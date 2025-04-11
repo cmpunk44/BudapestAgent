@@ -1,7 +1,7 @@
 # app.py
 
 import streamlit as st
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage  # Ez maradhat, ha langchain_core-t használsz
 from agent import budapest_agent
 
 # Streamlit oldalbeállítások
@@ -15,9 +15,13 @@ user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ip
 
 if st.button("Küldés") and user_input:
     with st.spinner("Dolgozom a válaszon..."):
-        initial_message = HumanMessage(content=user_input)
-        result = budapest_agent.graph.invoke({"messages": [initial_message]})
-        output = result["messages"][-1].content
+        try:
+            initial_message = HumanMessage(content=user_input)
+            result = budapest_agent.graph.invoke({"messages": [initial_message]})
+            output = result["messages"][-1].content
 
-        st.markdown("### Válasz")
-        st.write(output)
+            st.markdown("### Válasz")
+            st.write(output)
+        except Exception as e:
+            st.error(f"Hiba történt: {str(e)}")
+
