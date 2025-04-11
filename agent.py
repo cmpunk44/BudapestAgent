@@ -1,5 +1,3 @@
-# agent.py
-
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -10,7 +8,7 @@ import requests
 import operator
 from typing import TypedDict, Annotated
 
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage  # <- Itt a frissítés!
 from langchain_core.messages import ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
