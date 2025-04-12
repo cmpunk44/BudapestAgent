@@ -13,11 +13,19 @@ st.markdown("Írj be, hova szeretnél menni, és ajánlok útvonalat + látnival
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# Gombok oldalpanelben
+# Gombok és tool debug oldalsávban
 with st.sidebar:
     if st.button("🗑️ Törlés / Újrakezdés"):
         st.session_state.chat_history = []
-        st.rerun()  # frissített metódus
+        st.rerun()
+
+    # Tool-hívások megjelenítése
+    st.markdown("---")
+    st.markdown("### 🔧 Tool hívások")
+    for msg in reversed(st.session_state.chat_history):
+        if isinstance(msg, ToolMessage):
+            st.markdown(f"**Tool:** `{msg.name}`")
+            st.code(msg.content, language="json")
 
 # Bemenet
 user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ipar utcáról a Hősök terére?")
@@ -25,7 +33,6 @@ user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ip
 if st.button("Küldés") and user_input:
     with st.spinner("Dolgozom a válaszon..."):
         try:
-            # Előző beszélgetések + új üzenet
             st.session_state.chat_history.append(HumanMessage(content=user_input))
             result = budapest_agent.graph.invoke({"messages": st.session_state.chat_history})
             response = result["messages"][-1]
