@@ -34,12 +34,12 @@ if st.button("Küldés") and user_input:
                     if len(lines) == 2:
                         call_line, observation = lines
                         st.markdown(f"**Action:** `{msg.name}`")
-                        st.code(call_line, language="json")
+                        st.code(call_line.strip(), language="json")
                         st.markdown("**Observation:**")
-                        st.code(observation, language="json")
+                        st.code(observation.strip(), language="json")
                     else:
                         st.markdown(f"**Action:** `{msg.name}`")
-                        st.code(msg.content, language="json")
+                        st.code(msg.content.strip(), language="json")
 
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
