@@ -49,8 +49,11 @@ def get_directions(from_place: str, to_place: str) -> dict:
     response = requests.get(url, params=params)
     return response.json() if response.status_code == 200 else {"error": "Directions API failed"}
 
-# --- Új Tool: Attrakciók megállók környékén ---
-def get_attractions_near_stops(route_data: dict) -> dict:
+class RouteInput(TypedDict):
+    route_data: dict
+
+@tool
+def get_attractions_near_stops_tool(*, route_data: dict) -> dict:
     try:
         places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
         all_attractions = set()
