@@ -53,7 +53,8 @@ class RouteInput(TypedDict):
     route_data: dict
 
 @tool
-def get_attractions_near_stops_tool(*, route_data: dict) -> dict:
+def get_attractions_near_stops_tool(route_data: dict) -> dict:
+    """Finds tourist attractions near public transport stops along the route."""
     try:
         places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
         all_attractions = set()
