@@ -4,7 +4,3 @@ langchain_core
 langgraph
 python-dotenv
 requests
-langchain>=0.1.14
-langgraph>=0.0.35
-openai
-streamlit
