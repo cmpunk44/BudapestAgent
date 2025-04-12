@@ -1,17 +1,16 @@
 # app.py
 
 import streamlit as st
-from langchain_core.messages import HumanMessage  # Ez maradhat, ha langchain_core-t használsz
+from langchain_core.messages import HumanMessage
 from agent import budapest_agent
 
-# Streamlit oldalbeállítások
+# Oldalbeállítások
 st.set_page_config(page_title="Budapest Agent", layout="centered")
-
 st.title("🚌 Budapest Tömegközlekedési Asszisztens")
 st.markdown("Írd be, hova szeretnél menni, és ajánlok útvonalat + látnivalókat!")
 
 # Felhasználói bemenet
-user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ipar utcáról a Hősök terére?")
+user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el a Margit hídtól a Hősök terére?")
 
 if st.button("Küldés") and user_input:
     with st.spinner("Dolgozom a válaszon..."):
@@ -23,10 +22,9 @@ if st.button("Küldés") and user_input:
             st.markdown("### Válasz")
             st.write(output)
 
-            # 🔍 Debug panel
-            with st.expander("🛠 Debug info"):
-                st.json(result)  # az egész message flow, beleértve a tool_calls-t is
+            # 🛠 Debug info (csak ha kell)
+            with st.expander("🛠 Részletes rendszerüzenetek"):
+                st.json(result)
 
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
-
