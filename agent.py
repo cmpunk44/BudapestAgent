@@ -1,4 +1,4 @@
-# === ReAct-style agent.py ===
+# agent.py – ReAct with Thought-before-Action style
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -10,7 +10,7 @@ import requests
 import operator
 from typing import TypedDict, Annotated
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
@@ -113,38 +113,43 @@ class Agent:
         return {'messages': [message]}
 
     def take_action(self, state: AgentState):
-        tool_calls = state['messages'][-1].tool_calls
+        # Az LLM legutóbbi válasza legyen az első gondolat (Thought + Action)
+        previous_ai_message = state['messages'][-1]
+
+        tool_calls = previous_ai_message.tool_calls
         results = []
 
         for t in tool_calls:
             if t['name'] not in self.tools:
-                result = "Invalid tool name. Retry."
+                result = "Invalid tool name."
             else:
                 result = self.tools[t['name']].invoke(t['args'])
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
 
-        messages = state["messages"] + results
-        next_llm = self.model.invoke(messages)
-        return {"messages": results + [next_llm]}
+        # Append: Thought → Action → Observation → (új) Thought
+        new_messages = state['messages'] + results
+        next_ai = self.model.invoke(new_messages)
 
-# === Prompt ===
+        return {'messages': results + [next_ai]}
+
+# === Prompt: Thought-before-Action ===
 prompt = """
-You are a ReAct-style assistant. Help the user plan a public transport route in Budapest and recommend nearby tourist attractions.
+You are a ReAct-style assistant. Your job is to plan routes in Budapest and suggest attractions.
 
-For each step:
-- Thought: explain what you're thinking
-- Action: call one tool
-- Observation: process result
-- Repeat until ready
+Always follow this loop:
+- Thought: what to do next
+- Action: call ONE tool with exact arguments
+- Observation: tool result
+Repeat until you're ready to give a final answer.
 
-Tools:
-- parse_input_tool(text: str) → {'from': ..., 'to': ...}
-- directions_tool(from_place, to_place)
-- attractions_tool(start_lat, start_lng, end_lat, end_lng)
+Available tools:
+- parse_input_tool(text: str)
+- directions_tool(from_place: str, to_place: str)
+- attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng: float)
 
-When done:
-Thought: I now have enough information
-Final Answer: [...]
+At the end:
+Thought: I now have everything.
+Final Answer: [the route summary and attraction tips.]
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
