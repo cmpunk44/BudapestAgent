@@ -1,7 +1,4 @@
-# agent.py
-
-from dotenv import load_dotenv
-load_dotenv()
+# --- Budapest Agent with route-aware attractions tool ---
 
 import os
 import json
@@ -10,28 +7,26 @@ import requests
 import operator
 from typing import TypedDict, Annotated
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.messages import ToolMessage, AnyMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
-from langchain.agents import create_react_agent, AgentExecutor
 
-# === 1. API kulcsok betöltése ===
+# --- API kulcsok betöltése ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAPS_API_KEY = os.getenv("MAPS_API_KEY")
 
-# === 2. LLM példány ===
+# --- LLM példány ---
 llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
 
-# === 3. Tool: helyszínek kinyerése szövegből ===
+# --- Tool: helyszínek kinyerése szövegből ---
 def parse_trip_input(user_input: str) -> dict:
-    prompt = f"""
+    prompt = f'''
     You are a multilingual assistant. Extract two locations from this sentence.
     Respond ONLY with a JSON like:
     {{"from": "X", "to": "Y"}}
     Input: "{user_input}"
-    """
+    '''
     messages = [HumanMessage(content=prompt)]
     response = llm.invoke(messages)
 
@@ -41,7 +36,7 @@ def parse_trip_input(user_input: str) -> dict:
         match = re.search(r'from\s+(.*?)\s+to\s+(.*)', user_input, re.IGNORECASE)
         return {"from": match.group(1), "to": match.group(2)} if match else {"from": "", "to": ""}
 
-# === 4. Tool: Directions API ===
+# --- Tool: Directions API ---
 def get_directions(from_place: str, to_place: str) -> dict:
     url = "https://maps.googleapis.com/maps/api/directions/json"
     params = {
@@ -54,24 +49,45 @@ def get_directions(from_place: str, to_place: str) -> dict:
     response = requests.get(url, params=params)
     return response.json() if response.status_code == 200 else {"error": "Directions API failed"}
 
-# === 5. Tool: Places API ===
-def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
-    places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-    attractions = []
-    for lat, lng in [(start_lat, start_lng), (end_lat, end_lng)]:
-        params = {
-            "location": f"{lat},{lng}",
-            "radius": 1000,
-            "type": "tourist_attraction",
-            "key": MAPS_API_KEY
-        }
-        res = requests.get(places_url, params=params)
-        if res.status_code == 200:
-            data = res.json()
-            attractions += [r.get("name") for r in data.get("results", [])]
-    return {"attractions": attractions}
+# --- Új Tool: Attrakciók megállók környékén ---
+def get_attractions_near_stops(route_data: dict) -> dict:
+    try:
+        places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+        all_attractions = set()
 
-# === 6. Tool dekorátorok ===
+        stops = []
+        for leg in route_data.get("routes", [])[0].get("legs", []):
+            for step in leg.get("steps", []):
+                if step.get("travel_mode") == "TRANSIT":
+                    transit = step.get("transit_details", {})
+                    for key in ["departure_stop", "arrival_stop"]:
+                        stop = transit.get(key)
+                        if stop and "location" in stop:
+                            lat = stop["location"].get("lat")
+                            lng = stop["location"].get("lng")
+                            if lat and lng:
+                                stops.append((lat, lng))
+
+        unique_coords = list(dict.fromkeys(stops))
+
+        for lat, lng in unique_coords:
+            params = {
+                "location": f"{lat},{lng}",
+                "radius": 800,
+                "type": "tourist_attraction",
+                "key": MAPS_API_KEY
+            }
+            res = requests.get(places_url, params=params)
+            if res.status_code == 200:
+                data = res.json()
+                attractions = [r.get("name") for r in data.get("results", [])]
+                all_attractions.update(attractions)
+
+        return {"attractions": list(all_attractions)}
+    except Exception as e:
+        return {"error": str(e)}
+
+# --- Tool dekorátorok ---
 @tool
 def parse_input_tool(text: str) -> dict:
     """Parses user input and extracts 'from' and 'to' destinations."""
@@ -83,15 +99,15 @@ def directions_tool(from_place: str, to_place: str) -> dict:
     return get_directions(from_place, to_place)
 
 @tool
-def attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
-    """Finds tourist attractions near the route using Google Places API."""
-    return get_local_attractions(start_lat, start_lng, end_lat, end_lng)
+def get_attractions_near_stops_tool(route_data: dict) -> dict:
+    """Finds tourist attractions near public transport stops along the route."""
+    return get_attractions_near_stops(route_data)
 
-# === 7. AgentState ===
+# --- AgentState definíció ---
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
 
-# === 8. LangGraph alapú egyedi Agent ===
+# --- Agent osztály ---
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
@@ -121,33 +137,23 @@ class Agent:
         tool_calls = state['messages'][-1].tool_calls
         results = []
         for t in tool_calls:
-            call_line = f"Calling: {t}"
             if t['name'] not in self.tools:
                 result = "Invalid tool name. Retry."
             else:
                 result = self.tools[t['name']].invoke(t['args'])
-            full_content = f"{call_line}\n\n{json.dumps(result, indent=2, ensure_ascii=False)}"
-            results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=full_content))
+            results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         return {'messages': results}
 
-# === 9. Prompt és LangGraph agent példány ===
+# --- Agent példány ---
 prompt = """
 You are a helpful assistant for Budapest public transport and sightseeing.
-You think step-by-step and always follow the format:
-
-Thought: describe what you are thinking and what to do next
-Action: tool_name(arguments)
-Observation: result
-...
-Final Answer: your complete answer to the user
-
-Use tools when needed and stop once you can answer.
+You can:
+- Parse origin and destination from user input
+- Get directions using directions_tool
+- Find attractions near the route by calling get_attractions_near_stops_tool with route_data
+Call tools explicitly with correct arguments. Use multiple tools if needed.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
-tools = [parse_input_tool, directions_tool, attractions_tool]
+tools = [parse_input_tool, directions_tool, get_attractions_near_stops_tool]
 budapest_agent = Agent(model, tools, system=prompt)
-
-# === 10. ReAct ügynök ===
-react_agent = create_react_agent(llm=model, tools=tools)
-react_executor = AgentExecutor(agent=react_agent, tools=tools, verbose=True)
