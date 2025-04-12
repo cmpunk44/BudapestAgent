@@ -1,7 +1,7 @@
 # app.py
 
 import streamlit as st
-from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from agent import budapest_agent
 
 st.set_page_config(page_title="Budapest Agent", layout="centered")
@@ -31,22 +31,24 @@ if st.button("Küldés") and user_input:
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
 
-# Teljes beszélgetési panel fentről lefelé (mint a ChatGPT-ben)
+# Buborékos stílusú beszélgetési panel
 if st.session_state.chat_history:
     st.markdown("---")
     st.markdown("### Beszélgetés")
+
     for msg in st.session_state.chat_history:
         if isinstance(msg, ToolMessage):
             continue
         is_user = msg.type == "human"
-        with st.container():
-            align = "left" if is_user else "right"
-            role = "👤 Felhasználó:" if is_user else "🤖 Asszisztens:"
-            st.markdown(
-                f"<div style='text-align: {align}; padding: 0.5em; margin-bottom: 0.5em; background-color: {'#f0f0f0' if is_user else '#e6f2ff'}; border-radius: 0.5em;'>"
-                f"<strong>{role}</strong><br>{msg.content}"
-                f"</div>", unsafe_allow_html=True
-            )
+        align = "left" if is_user else "right"
+        role = "👤 Felhasználó:" if is_user else "🤖 Asszisztens:"
+        bg_color = "#f0f0f0" if is_user else "#e6f2ff"
+        st.markdown(
+            f"<div style='text-align: {align}; padding: 0.5em; margin-bottom: 0.5em; "
+            f"background-color: {bg_color}; border-radius: 0.5em; max-width: 80%; margin-{align}: auto;'>"
+            f"<strong>{role}</strong><br>{msg.content}"
+            f"</div>", unsafe_allow_html=True
+        )
 
 # Tool-hívások dinamikusan megjelenítve a sidebarban
 tool_messages = [msg for msg in st.session_state.chat_history if isinstance(msg, ToolMessage)]
