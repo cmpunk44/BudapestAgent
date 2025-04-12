@@ -22,10 +22,19 @@ llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature
 # --- Tool: helyszínek kinyerése szövegből ---
 def parse_trip_input(user_input: str) -> dict:
     prompt = f'''
-    You are a multilingual assistant. Extract two locations from this sentence.
-    Respond ONLY with a JSON like:
-    {{"from": "X", "to": "Y"}}
-    Input: "{user_input}"
+    You are a multilingual assistant.
+    Extract the origin and destination from the following sentence.
+
+    Return a JSON object ONLY like this:
+    {{"from": "starting location", "to": "destination"}}
+
+    Examples:
+    - "How do I get from Blaha Lujza tér to Gellért Hill?"
+      → {{"from": "Blaha Lujza tér", "to": "Gellért Hill"}}
+    - "Utazzunk el a Széll Kálmán térről a Fővám térre!"
+      → {{"from": "Széll Kálmán tér", "to": "Fővám tér"}}
+
+    Sentence: "{user_input}"
     '''
     messages = [HumanMessage(content=prompt)]
     response = llm.invoke(messages)
@@ -100,7 +109,11 @@ def directions_tool(from_place: str, to_place: str) -> dict:
 
 @tool
 def get_attractions_near_stops_tool(*, route_data: dict) -> dict:
-    """Finds tourist attractions near public transport stops along the route."""
+    """Finds tourist attractions near public transport stops along the route.
+
+    Example usage:
+    get_attractions_near_stops_tool(route_data={{ ...JSON from directions_tool... }})
+    """
     return get_attractions_near_stops(route_data)
 
 # --- AgentState definíció ---
@@ -146,12 +159,24 @@ class Agent:
 
 # --- Agent példány ---
 prompt = """
-You are a helpful assistant for Budapest public transport and sightseeing.
-You can:
-- Parse origin and destination from user input
-- Get directions using directions_tool
-- Find attractions near the route by calling get_attractions_near_stops_tool with route_data
-Call tools explicitly with correct arguments. Use multiple tools if needed.
+You are a helpful assistant specialized in Budapest public transport and sightseeing. Your job is to help the user travel across the city and discover tourist attractions along the way.
+
+Here’s how you work:
+
+use parse_input_tool to extract origin and destination from the user input.
+use directions_tool to get route_data between them.
+After that, use get_attractions_near_stops_tool with this route_data. You MUST pass route_data as named argument.
+
+⚠️ When calling get_attractions_near_stops_tool, you MUST wrap the directions_tool result like this:
+get_attractions_near_stops_tool(route_data={{...}})
+
+Examples:
+User: How do I get from Keleti to Blaha Lujza tér?
+→ parse_input_tool
+→ directions_tool("Keleti", "Blaha Lujza tér")
+→ get_attractions_near_stops_tool(route_data={{...}})
+
+Always call tools explicitly, and make sure the arguments match the tool signatures.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
