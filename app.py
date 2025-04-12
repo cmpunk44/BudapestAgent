@@ -13,6 +13,11 @@ st.markdown("Írj be, hova szeretnél menni, és ajánlok útvonalat + látnival
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
+# Gomb a beszélgetés törlésére
+if st.button("🗑️ Törlés / Újrakezdés"):
+    st.session_state.chat_history = []
+    st.experimental_rerun()
+
 # Bemenet
 user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ipar utcáról a Hősök terére?")
 
