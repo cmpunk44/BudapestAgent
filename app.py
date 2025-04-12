@@ -2,7 +2,8 @@
 
 import streamlit as st
 from langchain_core.messages import HumanMessage
-from agent import budapest_agent, react_executor
+from agent import budapest_agent
+from agent import react_executor  # biztosítsd, hogy create_react_agent + AgentExecutor helyesen van definiálva
 
 # Streamlit oldalbeállítások
 st.set_page_config(page_title="Budapest Agent", layout="centered")
@@ -45,7 +46,10 @@ if st.button("Küldés") and user_input:
                             st.code(msg.content.strip(), language="json")
 
             else:
-                result = react_executor.invoke({"input": user_input})
+                response = react_executor.invoke({"input": user_input})
+                output = response.get("output", response)
+                st.markdown("### Válasz (ReAct Agent)")
+                st.write(output)
                 st.markdown("### Válasz (ReAct Agent)")
                 st.write(result["output"])
 
