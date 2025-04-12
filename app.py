@@ -34,18 +34,22 @@ user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ip
 if st.button("Küldés") and user_input:
     with st.spinner("Dolgozom a válaszon..."):
         try:
+            # Új kérdést hozzáadjuk
             st.session_state.chat_history.append(HumanMessage(content=user_input))
+            # Állapot alapján hívjuk a graph-ot, csak az új válaszokat vesszük ki
             result = budapest_agent.graph.invoke({"messages": st.session_state.chat_history})
-            for msg in result["messages"]:
-                st.session_state.chat_history.append(msg)
+            new_messages = result["messages"]
+            for msg in new_messages:
+                if msg not in st.session_state.chat_history:
+                    st.session_state.chat_history.append(msg)
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
 
-# Megjelenítés (fordított sorrend, utolsó üzenet legfelül)
+# Megjelenítés (helyes sorrendben, utolsó üzenet legalul)
 if st.session_state.chat_history:
     st.markdown("---")
     st.markdown("### Beszélgetés")
-    for msg in reversed(st.session_state.chat_history):
+    for msg in st.session_state.chat_history:
         # Csak Human és AI üzenetek megjelenítése itt
         if isinstance(msg, ToolMessage):
             continue
