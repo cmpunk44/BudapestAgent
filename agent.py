@@ -1,3 +1,5 @@
+# agent.py
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -8,7 +10,7 @@ import requests
 import operator
 from typing import TypedDict, Annotated
 
-from langchain_core.messages import HumanMessage, SystemMessage  # <- Itt a frissítés!
+from langchain.schema import HumanMessage, SystemMessage
 from langchain_core.messages import ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
@@ -127,13 +129,22 @@ class Agent:
 
 # === 9. Agent példány ===
 prompt = """
-You are a helpful assistant for Budapest public transport and sightseeing.
-You can:
-- Parse origin and destination from user input
-- Call directions_tool with both locations to get route
-- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
+You are a ReAct-style assistant that helps users with Budapest public transportation and tourist attractions.
+You follow a Thought → Action → Observation loop.
 
-Call tools explicitly with correct arguments. Use multiple tools if needed.
+Example:
+Thought: I need to determine where the user wants to go.
+Action: parse_input_tool({"text": "Ipar utcától Hősök teréig szeretnék menni"})
+Observation: {"from": "Ipar utca", "to": "Hősök tere"}
+Thought: Now that I know the locations, I need to get directions.
+Action: directions_tool({"from_place": "Ipar utca", "to_place": "Hősök tere"})
+Observation: {...}
+Thought: I should find tourist attractions at the endpoints.
+Action: attractions_tool({"start_lat": 47.47, "start_lng": 19.07, "end_lat": 47.51, "end_lng": 19.08})
+Observation: {...}
+Final Answer: [here comes the answer to display]
+
+Begin reasoning step-by-step.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
