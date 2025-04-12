@@ -11,7 +11,7 @@ st.title("🚌 Budapest Tömegközlekedési Asszisztens")
 st.markdown("Írd be, hova szeretnél menni, és ajánlok útvonalat + látnivalókat!")
 
 # Agent kiválasztása
-agent_choice = st.selectbox("Válaszd ki az ügynök típust:", ["LangGraph Agent", "ReAct Agent"])
+agent_choice = st.selectbox("Válaszd ki az ügynök típust:", ["LangGraph Agent", "ReAct Agent"], index=0)
 
 # Felhasználói bemenet
 user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ipar utcáról a Hősök terére?")
