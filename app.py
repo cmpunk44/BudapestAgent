@@ -1,7 +1,7 @@
 # app.py
 
 import streamlit as st
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 from agent import budapest_agent
 
 st.set_page_config(page_title="Budapest Agent", layout="centered")
@@ -35,8 +35,8 @@ if st.button("Küldés") and user_input:
         try:
             st.session_state.chat_history.append(HumanMessage(content=user_input))
             result = budapest_agent.graph.invoke({"messages": st.session_state.chat_history})
-            response = result["messages"][-1]
-            st.session_state.chat_history.append(response)
+            for msg in result["messages"]:
+                st.session_state.chat_history.append(msg)
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
 
@@ -45,7 +45,7 @@ if st.session_state.chat_history:
     st.markdown("---")
     st.markdown("### Beszélgetés")
     for msg in reversed(st.session_state.chat_history):
-        role = "👤" if msg.type == "human" else "🤖"
+        role = "👤" if msg.type == "human" else ("🤖" if msg.type == "ai" else "🔧")
         content = msg.content
         if isinstance(msg, ToolMessage):
             content += f"\n _(meghívott tool: `{msg.name}`)_"
