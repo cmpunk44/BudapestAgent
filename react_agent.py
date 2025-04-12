@@ -7,7 +7,8 @@ import os
 import requests
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_react_agent, AgentExecutor
+from langchain.agents import AgentExecutor
+from langgraph.prebuilt import create_react_agent
 
 # === API Keys ===
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -49,5 +50,5 @@ def attraction_tool(lat: float, lng: float) -> dict:
 llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
 tools = [directions_tool, attraction_tool]
 
-react_agent = create_react_agent(llm=llm, tools=tools)
+react_agent = create_react_agent(llm=model, tools=tools)
 react_executor = AgentExecutor(agent=react_agent, tools=tools, verbose=True)
