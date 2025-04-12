@@ -1,4 +1,4 @@
-# --- Budapest Agent with route-aware attractions tool ---
+# --- Budapest Agent with simplified attraction logic (start, end, transfers only) ---
 
 import os
 import json
@@ -58,41 +58,49 @@ def get_directions(from_place: str, to_place: str) -> dict:
     response = requests.get(url, params=params)
     return response.json() if response.status_code == 200 else {"error": "Directions API failed"}
 
-# --- Új Tool: Attrakciók megállók környékén ---
-def get_attractions_near_stops(route_data: dict) -> dict:
+# --- Egyszerűsített attrakciókeresés (start, end, transfer) ---
+def get_main_point_attractions(route_data: dict) -> dict:
     try:
         places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-        all_attractions = set()
+        coords = []
 
-        stops = []
-        for leg in route_data.get("routes", [])[0].get("legs", []):
-            for step in leg.get("steps", []):
-                if step.get("travel_mode") == "TRANSIT":
-                    transit = step.get("transit_details", {})
-                    for key in ["departure_stop", "arrival_stop"]:
-                        stop = transit.get(key)
-                        if stop and "location" in stop:
-                            lat = stop["location"].get("lat")
-                            lng = stop["location"].get("lng")
-                            if lat and lng:
-                                stops.append((lat, lng))
+        legs = route_data.get("routes", [])[0].get("legs", [])
+        if not legs:
+            return {"attractions": []}
 
-        unique_coords = list(dict.fromkeys(stops))
+        # Start and end point
+        coords.append(legs[0].get("start_location"))
+        coords.append(legs[-1].get("end_location"))
 
-        for lat, lng in unique_coords:
+        # Transfer points (if any)
+        for step in legs[0].get("steps", []):
+            if step.get("travel_mode") == "TRANSIT":
+                transit = step.get("transit_details", {})
+                transfer_stop = transit.get("arrival_stop", {}).get("location")
+                if transfer_stop:
+                    coords.append(transfer_stop)
+
+        # Search attractions near these points
+        attractions = set()
+        for loc in coords:
+            if not loc:
+                continue
+            lat, lng = loc.get("lat"), loc.get("lng")
+            if lat is None or lng is None:
+                continue
             params = {
                 "location": f"{lat},{lng}",
-                "radius": 800,
+                "radius": 1000,
                 "type": "tourist_attraction",
                 "key": MAPS_API_KEY
             }
             res = requests.get(places_url, params=params)
             if res.status_code == 200:
                 data = res.json()
-                attractions = [r.get("name") for r in data.get("results", [])]
-                all_attractions.update(attractions)
+                names = [r.get("name") for r in data.get("results", []) if r.get("name")]
+                attractions.update(names)
 
-        return {"attractions": list(all_attractions)}
+        return {"attractions": list(attractions)}
     except Exception as e:
         return {"error": str(e)}
 
@@ -108,13 +116,9 @@ def directions_tool(from_place: str, to_place: str) -> dict:
     return get_directions(from_place, to_place)
 
 @tool
-def get_attractions_near_stops_tool(*, route_data: dict) -> dict:
-    """Finds tourist attractions near public transport stops along the route.
-
-    Example usage:
-    get_attractions_near_stops_tool(route_data={{ ...JSON from directions_tool... }})
-    """
-    return get_attractions_near_stops(route_data)
+def get_main_point_attractions_tool(*, route_data: dict) -> dict:
+    """Finds tourist attractions at start, end, and transfer points."""
+    return get_main_point_attractions(route_data)
 
 # --- AgentState definíció ---
 class AgentState(TypedDict):
@@ -159,26 +163,17 @@ class Agent:
 
 # --- Agent példány ---
 prompt = """
-You are a helpful assistant specialized in Budapest public transport and sightseeing. Your job is to help the user travel across the city and discover tourist attractions along the way.
+You are a helpful assistant specialized in Budapest public transport and sightseeing. Your job is to help the user travel across the city and discover tourist attractions.
 
-Here’s how you work:
+Workflow:
+1. Use parse_input_tool to extract origin and destination.
+2. Use directions_tool to get a route.
+3. Use get_main_point_attractions_tool and pass the full route_data.
+   Only find attractions near the starting location, ending location, and transfer stops.
 
-use parse_input_tool to extract origin and destination from the user input.
-use directions_tool to get route_data between them.
-After that, use get_attractions_near_stops_tool with this route_data. You MUST pass route_data as named argument.
-
-⚠️ When calling get_attractions_near_stops_tool, you MUST wrap the directions_tool result like this:
-get_attractions_near_stops_tool(route_data={{...}})
-
-Examples:
-User: How do I get from Keleti to Blaha Lujza tér?
-→ parse_input_tool
-→ directions_tool("Keleti", "Blaha Lujza tér")
-→ get_attractions_near_stops_tool(route_data={{...}})
-
-Always call tools explicitly, and make sure the arguments match the tool signatures.
+Call all tools explicitly using the correct tool name and argument keys.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
-tools = [parse_input_tool, directions_tool, get_attractions_near_stops_tool]
+tools = [parse_input_tool, directions_tool, get_main_point_attractions_tool]
 budapest_agent = Agent(model, tools, system=prompt)
