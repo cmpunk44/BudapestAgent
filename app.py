@@ -2,7 +2,7 @@
 
 import streamlit as st
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from react_budapest_agent import budapest_agent
+from agent import budapest_agent
 
 # Oldalbeállítások
 st.set_page_config(page_title="Budapest ReAct Agent", layout="centered")
