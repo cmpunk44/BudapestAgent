@@ -15,6 +15,7 @@ from langchain_core.messages import ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
+from langchain.agents import create_react_agent, AgentExecutor
 
 # === 1. API kulcsok betöltése ===
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -90,7 +91,7 @@ def attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
 
-# === 8. Agent osztály ===
+# === 8. LangGraph alapú egyedi Agent ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
@@ -129,17 +130,24 @@ class Agent:
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=full_content))
         return {'messages': results}
 
-# === 9. Agent példány ===
+# === 9. Prompt és LangGraph agent példány ===
 prompt = """
 You are a helpful assistant for Budapest public transport and sightseeing.
-You can:
-- Parse origin and destination from user input
-- Call directions_tool with both locations to get route
-- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
+You think step-by-step and always follow the format:
 
-Call tools explicitly with correct arguments. Use multiple tools if needed.
+Thought: describe what you are thinking and what to do next
+Action: tool_name(arguments)
+Observation: result
+...
+Final Answer: your complete answer to the user
+
+Use tools when needed and stop once you can answer.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
 tools = [parse_input_tool, directions_tool, attractions_tool]
 budapest_agent = Agent(model, tools, system=prompt)
+
+# === 10. ReAct ügynök ===
+react_agent = create_react_agent(llm=model, tools=tools)
+react_executor = AgentExecutor(agent=react_agent, tools=tools, verbose=True)
