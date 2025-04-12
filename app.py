@@ -22,5 +22,11 @@ if st.button("Küldés") and user_input:
 
             st.markdown("### Válasz")
             st.write(output)
+
+            # 🔍 Debug panel
+            with st.expander("🛠 Debug info"):
+                st.json(result)  # az egész message flow, beleértve a tool_calls-t is
+
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
+
