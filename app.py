@@ -19,11 +19,12 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.rerun()
 
-    # Tool-hívások megjelenítése
-    st.markdown("---")
-    st.markdown("### 🔧 Tool hívások")
-    for msg in reversed(st.session_state.chat_history):
-        if isinstance(msg, ToolMessage):
+    # Tool-hívások megjelenítése külön
+    tool_messages = [msg for msg in st.session_state.chat_history if isinstance(msg, ToolMessage)]
+    if tool_messages:
+        st.markdown("---")
+        st.markdown("### 🔧 Tool hívások")
+        for msg in reversed(tool_messages):
             st.markdown(f"**Tool:** `{msg.name}`")
             st.code(msg.content, language="json")
 
@@ -45,8 +46,8 @@ if st.session_state.chat_history:
     st.markdown("---")
     st.markdown("### Beszélgetés")
     for msg in reversed(st.session_state.chat_history):
-        role = "👤" if msg.type == "human" else ("🤖" if msg.type == "ai" else "🔧")
-        content = msg.content
+        # Csak Human és AI üzenetek megjelenítése itt
         if isinstance(msg, ToolMessage):
-            content += f"\n _(meghívott tool: `{msg.name}`)_"
-        st.markdown(f"**{role}** {content}")
+            continue
+        role = "👤" if msg.type == "human" else "🤖"
+        st.markdown(f"**{role}** {msg.content}")
