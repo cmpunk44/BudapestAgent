@@ -35,8 +35,7 @@ if st.button("Küldés") and user_input:
         try:
             st.session_state.chat_history.append(HumanMessage(content=user_input))
             result = budapest_agent.graph.invoke({"messages": st.session_state.chat_history})
-            for msg in result["messages"]:
-                st.session_state.chat_history.append(msg)
+            st.session_state.chat_history.extend(result["messages"])
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
 
@@ -45,7 +44,6 @@ if st.session_state.chat_history:
     st.markdown("---")
     st.markdown("### Beszélgetés")
     for msg in reversed(st.session_state.chat_history):
-        if isinstance(msg, ToolMessage):
-            continue
-        role = "👤" if msg.type == "human" else "🤖"
-        st.markdown(f"**{role}** {msg.content}")
+        role = "👤" if msg.type == "human" else ("🤖" if msg.type == "ai" else None)
+        if role:
+            st.markdown(f"**{role}** {msg.content}")
