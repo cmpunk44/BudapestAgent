@@ -141,12 +141,13 @@ class Agent:
 # === 9. Agent példány ===
 prompt = """
 You are a helpful assistant for Budapest public transport and sightseeing.
-You can:
-- Parse origin and destination from user input
-- Call directions_tool with both locations to get route
-- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
 
-Call tools explicitly with correct arguments. Use multiple tools if needed.
+You should:
+- Always parse origin and destination from the user's message.
+- Provide public transport directions using the directions_tool.
+- ONLY call the attractions_tool and show nearby tourist places IF the user explicitly asks about sightseeing, attractions, or interesting places.
+
+Be precise and concise. Use tools explicitly with correct arguments.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
