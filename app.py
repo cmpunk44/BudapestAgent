@@ -1,36 +1,35 @@
-# app.py
-
 import streamlit as st
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from agent import budapest_agent
 
-# Oldalbeállítások
-st.set_page_config(page_title="Budapest ReAct Agent", layout="centered")
-st.title("🚌 Budapest ReAct Tömegközlekedési Asszisztens")
-st.markdown("Írd be, hova szeretnél menni, és figyeld meg, hogyan gondolkodik az asszisztens lépésről lépésre!")
+st.set_page_config(page_title="Budapest Agent", layout="centered")
+st.title("🚌 Budapest Tömegközlekedési Asszisztens")
+st.markdown("Írd be, hova szeretnél menni, és ajánlok útvonalat + látnivalókat!")
 
-# Felhasználói bemenet
-user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Oktogontól a Hősök terére?")
+# Bemenet
+user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ipar utcáról a Hősök terére?")
 
+# Gomb: új beszélgetés
+if st.button("🧹 Új beszélgetés"):
+    budapest_agent.reset_history()
+    st.experimental_rerun()
+
+# Gomb: küldés
 if st.button("Küldés") and user_input:
     with st.spinner("Dolgozom a válaszon..."):
         try:
-            initial_message = HumanMessage(content=user_input)
-            result = budapest_agent.graph.invoke({"messages": [initial_message]})
-            messages = result["messages"]
+            budapest_agent.add_user_message(user_input)
+            result = budapest_agent.run()
+            output = result["messages"][-1].content
+            budapest_agent.history.append(result["messages"][-1])  # LLM válasz mentése
 
-            st.markdown("### 💬 Beszélgetés")
-            for msg in messages:
-                if isinstance(msg, HumanMessage):
-                    st.markdown(f"**🧑 Felhasználó:** {msg.content}")
-                elif isinstance(msg, ToolMessage):
-                    st.markdown(f"**🛠️ Observation ({msg.name}):** {msg.content}")
-                elif isinstance(msg, AIMessage):
-                    st.markdown(f"**🤖 Asszisztens:** {msg.content}")
-
-            st.markdown("\n---\n")
-            st.markdown("### 🟢 Összefoglaló válasz")
-            st.success(messages[-1].content)
-
+            st.markdown("### Válasz")
+            st.write(output)
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
+
+# Előzmények megjelenítése
+if budapest_agent.get_history():
+    st.markdown("### Beszélgetés előzménye")
+    for msg in budapest_agent.get_history():
+        role = "👤" if msg.type == "human" else "🤖"
+        st.markdown(f"**{role}:** {msg.content}")
