@@ -19,17 +19,19 @@ if st.button("Küldés") and user_input:
         try:
             budapest_agent.add_user_message(user_input)
             result = budapest_agent.run()
-            output = result["messages"][-1].content
-            budapest_agent.history.append(result["messages"][-1])  # LLM válasz mentése
-
-            st.markdown("### Válasz")
-            st.write(output)
+            response = result["messages"][-1]
+            budapest_agent.history.append(response)
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
 
-# Előzmények megjelenítése
+# Chat-szerű megjelenítés
 if budapest_agent.get_history():
-    st.markdown("### Beszélgetés előzménye")
     for msg in budapest_agent.get_history():
-        role = "👤" if msg.type == "human" else "🤖"
+        if msg.type == "human":
+            st.markdown(f"**👤 Te:** {msg.content}")
+        elif msg.type == "tool":
+            continue  # ne jelenítsük meg a tool-üzeneteket
+        else:
+            st.markdown(f"**🤖 Asszisztens:** {msg.content}")
+
         st.markdown(f"**{role}:** {msg.content}")
