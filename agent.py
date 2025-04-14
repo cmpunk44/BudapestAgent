@@ -1,54 +1,182 @@
-import streamlit as st
-from langchain_core.messages import HumanMessage
-from agent import budapest_agent  # a frissített Agent osztály itt van
+from dotenv import load_dotenv
+load_dotenv()
 
-# Streamlit oldalbeállítások
-st.set_page_config(page_title="Budapest Agent", layout="wide")  # fontos: wide
+import os
+import json
+import re
+import requests
+import operator
+from typing import TypedDict, Annotated
 
-# Két hasábos elrendezés: Bal (Debug), Jobb (Chat)
-left_col, right_col = st.columns([1, 2])  # Debug : Chat
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, END
+from langchain_core.tools import tool
 
-# === 🐞 DEBUG PANEL ===
-with left_col:
-    st.markdown("### 🐞 Debug Panel")
-    history = budapest_agent.get_history()
-    if history:
-        for i, msg in enumerate(history):
-            role = msg.type.upper()
-            st.markdown(f"**{i+1}. {role}**")
-            try:
-                # JSON ha lehet
-                parsed = json.loads(msg.content)
-                st.json(parsed)
-            except:
-                st.code(str(msg.content), language="markdown")
+# === 1. API kulcsok betöltése ===
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MAPS_API_KEY = os.getenv("MAPS_API_KEY")
 
-        # Az utolsó üzenet tool válasza részletesen
-        if history[-1].type == "tool":
-            st.markdown("**🔧 Last Tool Output (parsed)**")
-            try:
-                st.json(json.loads(history[-1].content))
-            except:
-                st.warning("Tool output is not valid JSON.")
+# === 2. LLM példány ===
+llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
 
-# === 💬 CHAT UI ===
-with right_col:
-    st.title("🚌 Budapest Tömegközlekedési Asszisztens")
-    st.markdown("Írd be, hova szeretnél menni, és ajánlok útvonalat vagy látványosságokat!")
+# === 3. Tool: helyszínek kinyerése szövegből ===
+def parse_trip_input(user_input: str) -> dict:
+    prompt = f"""
+    You are a multilingual assistant. Extract two locations from this sentence.
+    Respond ONLY with a JSON like:
+    {{"from": "X", "to": "Y"}}
+    Input: "{user_input}"
+    """
+    messages = [HumanMessage(content=prompt)]
+    response = llm.invoke(messages)
 
-    user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ipar utcáról a Hősök terére?")
+    try:
+        return json.loads(response.content)
+    except:
+        match = re.search(r'from\s+(.*?)\s+to\s+(.*)', user_input, re.IGNORECASE)
+        return {"from": match.group(1), "to": match.group(2)} if match else {"from": "", "to": ""}
 
-    # Új beszélgetés gomb
-    if st.button("🧹 Új beszélgetés"):
-        budapest_agent.reset_history()
+# === 4. Tool: Directions API ===
+def get_directions(from_place: str, to_place: str) -> dict:
+    url = "https://maps.googleapis.com/maps/api/directions/json"
+    params = {
+        "origin": from_place,
+        "destination": to_place,
+        "mode": "transit",
+        "transit_mode": "bus|subway|train|tram",
+        "key": MAPS_API_KEY
+    }
+    response = requests.get(url, params=params)
+    return response.json() if response.status_code == 200 else {"error": "Directions API failed"}
 
-    # Küldés gomb
-    if st.button("Küldés") and user_input:
-        with st.spinner("Dolgozom a válaszon..."):
-            try:
-                budapest_agent.add_user_message(user_input)
-                result = budapest_agent.run()
-                response = result["messages"][-1]
-                budapest_agent.history.append(response)
-            except Exception as e:
-                st.error(f"Hiba történt: {
+# === 5. Tool: Places API ===
+def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
+    places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    attractions = []
+    for lat, lng in [(start_lat, start_lng), (end_lat, end_lng)]:
+        params = {
+            "location": f"{lat},{lng}",
+            "radius": 1000,
+            "type": "tourist_attraction",
+            "key": MAPS_API_KEY
+        }
+        res = requests.get(places_url, params=params)
+        if res.status_code == 200:
+            data = res.json()
+            attractions += [r.get("name") for r in data.get("results", [])]
+    return {"attractions": attractions}
+
+# === 6. Tool: GPT-4o leírás attrakciókhoz (javított input) ===
+@tool
+def attraction_info_tool(attractions: list) -> dict:
+    """
+    Provides short Budapest-specific descriptions for a list of attractions.
+    Input: list of attraction names (strings).
+    Output: dict with name → description pairs.
+    """
+    if not attractions:
+        return {"info": {}}
+
+    prompt = f"""
+You are a tourist assistant specialized in Budapest.
+
+Please provide a short (max 3 sentences) Budapest-specific description for each of the following tourist attractions:
+
+{json.dumps(attractions, indent=2)}
+
+Focus ONLY on Budapest context. No global or irrelevant content.
+Return a list where each name is followed by its description.
+"""
+
+    gpt4_model = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11")
+    response = gpt4_model.invoke([HumanMessage(content=prompt)])
+    return {"info": response.content}
+
+# === 7. Tool dekorátorok ===
+@tool
+def parse_input_tool(text: str) -> dict:
+    """Parses user input and extracts 'from' and 'to' destinations."""
+    return parse_trip_input(text)
+
+@tool
+def directions_tool(from_place: str, to_place: str) -> dict:
+    """Gets public transport route using Google Directions API."""
+    return get_directions(from_place, to_place)
+
+@tool
+def attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
+    """Finds tourist attractions near the route using Google Places API."""
+    return get_local_attractions(start_lat, start_lng, end_lat, end_lng)
+
+# === 8. AgentState ===
+class AgentState(TypedDict):
+    messages: Annotated[list[AnyMessage], operator.add]
+
+# === 9. Agent osztály ===
+class Agent:
+    def __init__(self, model, tools, system=""):
+        self.system = system
+        self.model = model.bind_tools(tools)
+        self.tools = {t.name: t for t in tools}
+        self.history = []
+
+        graph = StateGraph(AgentState)
+        graph.add_node("llm", self.call_openai)
+        graph.add_node("action", self.take_action)
+        graph.add_conditional_edges("llm", self.exists_action, {True: "action", False: END})
+        graph.add_edge("action", "llm")
+        graph.set_entry_point("llm")
+        self.graph = graph.compile()
+
+    def exists_action(self, state: AgentState):
+        result = state['messages'][-1]
+        return len(result.tool_calls) > 0
+
+    def call_openai(self, state: AgentState):
+        messages = state['messages']
+        if self.system:
+            messages = [SystemMessage(content=self.system)] + messages
+        message = self.model.invoke(messages)
+        return {'messages': [message]}
+
+    def take_action(self, state: AgentState):
+        tool_calls = state['messages'][-1].tool_calls
+        results = []
+        for t in tool_calls:
+            if t['name'] not in self.tools:
+                result = "Invalid tool name. Retry."
+            else:
+                result = self.tools[t['name']].invoke(t['args'])
+            results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
+        return {'messages': results}
+
+    # === Chat history kezelés ===
+    def add_user_message(self, message: str):
+        self.history.append(HumanMessage(content=message))
+
+    def reset_history(self):
+        self.history = []
+
+    def get_history(self) -> list:
+        return self.history
+
+    def run(self):
+        return self.graph.invoke({"messages": self.history})
+
+# === 10. Agent példány létrehozása ===
+prompt = """
+You are a helpful assistant for Budapest public transport and sightseeing.
+
+You can:
+- Parse origin and destination from user input
+- Call directions_tool with both locations to get route
+- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
+- If the user asks for more information about specific attractions, use attraction_info_tool with the attraction list.
+
+Always focus on Budapest. Never include information about locations outside of Budapest.
+"""
+
+model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
+tools = [parse_input_tool, directions_tool, attractions_tool, attraction_info_tool]
+budapest_agent = Agent(model, tools, system=prompt)
