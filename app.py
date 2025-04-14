@@ -3,17 +3,15 @@ from agent import budapest_agent
 
 st.set_page_config(page_title="Budapest Agent", layout="centered")
 st.title("🚌 Budapest Tömegközlekedési Asszisztens")
-st.markdown("Írd be, hova szeretnél menni, és ajánlok útvonalat + látnivalókat!")
+st.markdown("Írd be, hova szeretnél menni, és ajánlok útvonalat!")
 
-# Bemenet
 user_input = st.text_input("Kérdésed:", placeholder="Pl. Hogyan jutok el az Ipar utcáról a Hősök terére?")
 
-# Gomb: új beszélgetés
+# Reset gomb (frissítés nélkül!)
 if st.button("🧹 Új beszélgetés"):
     budapest_agent.reset_history()
-    st.experimental_rerun()
 
-# Gomb: küldés
+# Küldés gomb
 if st.button("Küldés") and user_input:
     with st.spinner("Dolgozom a válaszon..."):
         try:
@@ -24,14 +22,13 @@ if st.button("Küldés") and user_input:
         except Exception as e:
             st.error(f"Hiba történt: {str(e)}")
 
-# Chat-szerű megjelenítés
+# Megjelenítés
 if budapest_agent.get_history():
+    st.markdown("### Beszélgetés")
     for msg in budapest_agent.get_history():
         if msg.type == "human":
             st.markdown(f"**👤 Te:** {msg.content}")
         elif msg.type == "tool":
-            continue  # ne jelenítsük meg a tool-üzeneteket
+            continue  # ToolMessage-eket kihagyjuk
         else:
             st.markdown(f"**🤖 Asszisztens:** {msg.content}")
-
-        st.markdown(f"**{role}:** {msg.content}")
