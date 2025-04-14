@@ -67,15 +67,14 @@ def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, en
             attractions += [r.get("name") for r in data.get("results", [])]
     return {"attractions": attractions}
 
-# === 6. Tool: Attraction info with GPT-4o-search-preview ===
+# === 6. Tool: GPT-4o leírás attrakciókhoz (javított input) ===
 @tool
-def attraction_info_tool(attraction_data: dict) -> dict:
+def attraction_info_tool(attractions: list) -> dict:
     """
     Provides short Budapest-specific descriptions for a list of attractions.
-    Input: dict with key 'attractions' containing a list of strings.
+    Input: list of attraction names (strings).
     Output: dict with name → description pairs.
     """
-    attractions = attraction_data.get("attractions", [])
     if not attractions:
         return {"info": {}}
 
