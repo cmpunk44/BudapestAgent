@@ -1,5 +1,3 @@
-# agent.py – ReAct with Thought-before-Action style
-
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -10,19 +8,19 @@ import requests
 import operator
 from typing import TypedDict, Annotated
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage, AnyMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
 
-# === API kulcsok ===
+# === 1. API kulcsok betöltése ===
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MAPS_API_KEY = os.getenv("MAPS_API_KEY")
 
-# === LLM példány ===
+# === 2. LLM példány ===
 llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
 
-# === Tool: helyszínek kinyerése szövegből ===
+# === 3. Tool: helyszínek kinyerése szövegből ===
 def parse_trip_input(user_input: str) -> dict:
     prompt = f"""
     You are a multilingual assistant. Extract two locations from this sentence.
@@ -39,7 +37,7 @@ def parse_trip_input(user_input: str) -> dict:
         match = re.search(r'from\s+(.*?)\s+to\s+(.*)', user_input, re.IGNORECASE)
         return {"from": match.group(1), "to": match.group(2)} if match else {"from": "", "to": ""}
 
-# === Tool: Directions API ===
+# === 4. Tool: Directions API ===
 def get_directions(from_place: str, to_place: str) -> dict:
     url = "https://maps.googleapis.com/maps/api/directions/json"
     params = {
@@ -52,7 +50,7 @@ def get_directions(from_place: str, to_place: str) -> dict:
     response = requests.get(url, params=params)
     return response.json() if response.status_code == 200 else {"error": "Directions API failed"}
 
-# === Tool: Places API ===
+# === 5. Tool: Places API ===
 def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
     places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     attractions = []
@@ -69,29 +67,59 @@ def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, en
             attractions += [r.get("name") for r in data.get("results", [])]
     return {"attractions": attractions}
 
-# === Tool dekorátorok ===
+# === 6. Tool: GPT-4o leírás attrakciókhoz (javított input) ===
+@tool
+def attraction_info_tool(attractions: list) -> dict:
+    """
+    Provides short Budapest-specific descriptions for a list of attractions.
+    Input: list of attraction names (strings).
+    Output: dict with name → description pairs.
+    """
+    if not attractions:
+        return {"info": {}}
+
+    prompt = f"""
+You are a tourist assistant specialized in Budapest.
+
+Please provide a short (max 3 sentences) Budapest-specific description for each of the following tourist attractions:
+
+{json.dumps(attractions, indent=2)}
+
+Focus ONLY on Budapest context. No global or irrelevant content.
+Return a list where each name is followed by its description.
+"""
+
+    gpt4_model = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11")
+    response = gpt4_model.invoke([HumanMessage(content=prompt)])
+    return {"info": response.content}
+
+# === 7. Tool dekorátorok ===
 @tool
 def parse_input_tool(text: str) -> dict:
+    """Parses user input and extracts 'from' and 'to' destinations."""
     return parse_trip_input(text)
 
 @tool
 def directions_tool(from_place: str, to_place: str) -> dict:
+    """Gets public transport route using Google Directions API."""
     return get_directions(from_place, to_place)
 
 @tool
 def attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
+    """Finds tourist attractions near the route using Google Places API."""
     return get_local_attractions(start_lat, start_lng, end_lat, end_lng)
 
-# === AgentState ===
+# === 8. AgentState ===
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
 
-# === ReAct-stílusú Agent ===
+# === 9. Agent osztály ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
         self.model = model.bind_tools(tools)
         self.tools = {t.name: t for t in tools}
+        self.history = []
 
         graph = StateGraph(AgentState)
         graph.add_node("llm", self.call_openai)
@@ -113,45 +141,42 @@ class Agent:
         return {'messages': [message]}
 
     def take_action(self, state: AgentState):
-        # Az LLM legutóbbi válasza legyen az első gondolat (Thought + Action)
-        previous_ai_message = state['messages'][-1]
-
-        tool_calls = previous_ai_message.tool_calls
+        tool_calls = state['messages'][-1].tool_calls
         results = []
-
         for t in tool_calls:
             if t['name'] not in self.tools:
-                result = "Invalid tool name."
+                result = "Invalid tool name. Retry."
             else:
                 result = self.tools[t['name']].invoke(t['args'])
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
+        return {'messages': results}
 
-        # Append: Thought → Action → Observation → (új) Thought
-        new_messages = state['messages'] + results
-        next_ai = self.model.invoke(new_messages)
+    # === Chat history kezelés ===
+    def add_user_message(self, message: str):
+        self.history.append(HumanMessage(content=message))
 
-        return {'messages': results + [next_ai]}
+    def reset_history(self):
+        self.history = []
 
-# === Prompt: Thought-before-Action ===
+    def get_history(self) -> list:
+        return self.history
+
+    def run(self):
+        return self.graph.invoke({"messages": self.history})
+
+# === 10. Agent példány létrehozása ===
 prompt = """
-You are a ReAct-style assistant. Your job is to plan routes in Budapest and suggest attractions.
+You are a helpful assistant for Budapest public transport and sightseeing.
 
-Always follow this loop:
-- Thought: what to do next
-- Action: call ONE tool with exact arguments
-- Observation: tool result
-Repeat until you're ready to give a final answer.
+You can:
+- Parse origin and destination from user input
+- Call directions_tool with both locations to get route
+- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
+- If the user asks for more information about specific attractions, use attraction_info_tool with the attraction list.
 
-Available tools:
-- parse_input_tool(text: str)
-- directions_tool(from_place: str, to_place: str)
-- attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng: float)
-
-At the end:
-Thought: I now have everything.
-Final Answer: [the route summary and attraction tips.]
+Always focus on Budapest. Never include information about locations outside of Budapest.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
-tools = [parse_input_tool, directions_tool, attractions_tool]
+tools = [parse_input_tool, directions_tool, attractions_tool, attraction_info_tool]
 budapest_agent = Agent(model, tools, system=prompt)
