@@ -1,5 +1,3 @@
-# === ReAct-style Budapest Agent ===
-
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -72,26 +70,30 @@ def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, en
 # === 6. Tool dekorátorok ===
 @tool
 def parse_input_tool(text: str) -> dict:
+    """Parses user input and extracts 'from' and 'to' destinations."""
     return parse_trip_input(text)
 
 @tool
 def directions_tool(from_place: str, to_place: str) -> dict:
+    """Gets public transport route using Google Directions API."""
     return get_directions(from_place, to_place)
 
 @tool
 def attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
+    """Finds tourist attractions near the route using Google Places API."""
     return get_local_attractions(start_lat, start_lng, end_lat, end_lng)
 
-# === 7. AgentState definíció ===
+# === 7. AgentState ===
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
 
-# === 8. ReAct-stílusú Agent osztály ===
+# === 8. Agent osztály (HISTORY MENEDZSMENTTEL) ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
         self.model = model.bind_tools(tools)
         self.tools = {t.name: t for t in tools}
+        self.history = []
 
         graph = StateGraph(AgentState)
         graph.add_node("llm", self.call_openai)
@@ -115,37 +117,36 @@ class Agent:
     def take_action(self, state: AgentState):
         tool_calls = state['messages'][-1].tool_calls
         results = []
-
         for t in tool_calls:
             if t['name'] not in self.tools:
                 result = "Invalid tool name. Retry."
             else:
                 result = self.tools[t['name']].invoke(t['args'])
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
+        return {'messages': results}
 
-        # ⚡ ReAct loop: gondolat → action → observation → új gondolat
-        messages = state["messages"] + results
-        next_llm = self.model.invoke(messages)
-        return {"messages": results + [next_llm]}
+    # === ÚJ: történetkezelő metódusok ===
+    def add_user_message(self, message: str):
+        self.history.append(HumanMessage(content=message))
 
-# === 9. Prompt: ReAct szemlélet ===
+    def reset_history(self):
+        self.history = []
+
+    def get_history(self) -> list:
+        return self.history
+
+    def run(self):
+        return self.graph.invoke({"messages": self.history})
+
+# === 9. Agent példány ===
 prompt = """
-You are a ReAct-style assistant. Help users plan public transport routes in Budapest and suggest nearby tourist attractions.
+You are a helpful assistant for Budapest public transport and sightseeing.
+You can:
+- Parse origin and destination from user input
+- Call directions_tool with both locations to get route
+- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
 
-Follow this pattern:
-Thought: reason about the next step
-Action: call a tool
-Observation: observe the result
-Repeat until you're ready.
-
-Available tools:
-- parse_input_tool(text: str): returns {"from": ..., "to": ...}
-- directions_tool(from_place, to_place): returns route_data
-- attractions_tool(start_lat, start_lng, end_lat, end_lng): returns tourist places
-
-Finish with:
-Thought: I now have enough information
-Final Answer: your trip summary and recommendations
+Call tools explicitly with correct arguments. Use multiple tools if needed.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
