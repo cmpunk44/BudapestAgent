@@ -67,7 +67,34 @@ def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, en
             attractions += [r.get("name") for r in data.get("results", [])]
     return {"attractions": attractions}
 
-# === 6. Tool dekorátorok ===
+# === 6. Tool: Attraction info with GPT-4o-search-preview ===
+@tool
+def attraction_info_tool(attraction_data: dict) -> dict:
+    """
+    Provides short Budapest-specific descriptions for a list of attractions.
+    Input: dict with key 'attractions' containing a list of strings.
+    Output: dict with name → description pairs.
+    """
+    attractions = attraction_data.get("attractions", [])
+    if not attractions:
+        return {"info": {}}
+
+    prompt = f"""
+You are a tourist assistant specialized in Budapest.
+
+Please provide a short (max 3 sentences) Budapest-specific description for each of the following tourist attractions:
+
+{json.dumps(attractions, indent=2)}
+
+Focus ONLY on Budapest context. No global or irrelevant content.
+Return a list where each name is followed by its description.
+"""
+
+    gpt4_model = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11")
+    response = gpt4_model.invoke([HumanMessage(content=prompt)])
+    return {"info": response.content}
+
+# === 7. Tool dekorátorok ===
 @tool
 def parse_input_tool(text: str) -> dict:
     """Parses user input and extracts 'from' and 'to' destinations."""
@@ -83,11 +110,11 @@ def attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng
     """Finds tourist attractions near the route using Google Places API."""
     return get_local_attractions(start_lat, start_lng, end_lat, end_lng)
 
-# === 7. AgentState ===
+# === 8. AgentState ===
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
 
-# === 8. Agent osztály (HISTORY MENEDZSMENTTEL) ===
+# === 9. Agent osztály ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
@@ -125,7 +152,7 @@ class Agent:
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         return {'messages': results}
 
-    # === ÚJ: történetkezelő metódusok ===
+    # === Chat history kezelés ===
     def add_user_message(self, message: str):
         self.history.append(HumanMessage(content=message))
 
@@ -138,18 +165,19 @@ class Agent:
     def run(self):
         return self.graph.invoke({"messages": self.history})
 
-# === 9. Agent példány ===
+# === 10. Agent példány létrehozása ===
 prompt = """
 You are a helpful assistant for Budapest public transport and sightseeing.
 
-You should:
-- Always parse origin and destination from the user's message.
-- Provide public transport directions using the directions_tool.
-- ONLY call the attractions_tool and show nearby tourist places IF the user explicitly asks about sightseeing, attractions, or interesting places.
+You can:
+- Parse origin and destination from user input
+- Call directions_tool with both locations to get route
+- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
+- If the user asks for more information about specific attractions, use attraction_info_tool with the attraction list.
 
-Be precise and concise. Use tools explicitly with correct arguments.
+Always focus on Budapest. Never include information about locations outside of Budapest.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
-tools = [parse_input_tool, directions_tool, attractions_tool]
+tools = [parse_input_tool, directions_tool, attractions_tool, attraction_info_tool]
 budapest_agent = Agent(model, tools, system=prompt)
