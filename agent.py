@@ -93,62 +93,7 @@ Return a list where each name is followed by its description.
     gpt4_model = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11")
     response = gpt4_model.invoke([HumanMessage(content=prompt)])
     return {"info": response.content}
-from langchain_core.tools import tool
-@tool
-def get_schedule_tool(stop_name: str, route_name: str, weekday: str) -> dict:
-    """
-    Get departure times for a given stop and route on a specific weekday.
-    """
 
-    # Load GTFS tables
-    stops = gtfs["stops"]
-    routes = gtfs["routes"]
-    trips = gtfs["trips"]
-    stop_times = gtfs["stop_times"]
-    calendar = gtfs["calendar"]
-
-    # 1. Find stop_id by stop_name (case-insensitive match)
-    matched_stops = stops[stops['stop_name'].str.lower().str.contains(stop_name.lower())]
-    if matched_stops.empty:
-        return {"error": f"Stop '{stop_name}' not found."}
-    stop_ids = matched_stops['stop_id'].tolist()
-
-    # 2. Find route_id by route_name
-    matched_routes = routes[routes['route_long_name'].str.lower().str.contains(route_name.lower())]
-    if matched_routes.empty:
-        return {"error": f"Route '{route_name}' not found."}
-    route_ids = matched_routes['route_id'].tolist()
-
-    # 3. Filter calendar for given weekday
-    weekday_column = weekday.lower()
-    active_services = calendar[calendar[weekday_column] == 1]['service_id'].tolist()
-
-    # 4. Filter trips for both route and active service
-    trips_filtered = trips[
-        trips['route_id'].isin(route_ids) & trips['service_id'].isin(active_services)
-    ]
-    if trips_filtered.empty:
-        return {"error": "No trips found for this route on this day."}
-
-    trip_ids = trips_filtered['trip_id'].tolist()
-
-    # 5. Filter stop_times by trip_ids and stop_ids
-    departures = stop_times[
-        stop_times['trip_id'].isin(trip_ids) & stop_times['stop_id'].isin(stop_ids)
-    ]
-
-    if departures.empty:
-        return {"message": "No departures found for that stop/route on the selected day."}
-
-    # 6. Format output: show top 10 times
-    departure_times = departures.sort_values('departure_time')['departure_time'].head(10).tolist()
-
-    return {
-        "stop": stop_name,
-        "route": route_name,
-        "weekday": weekday,
-        "upcoming_departures": departure_times
-    }
 
 # === 7. Tool dekorátorok ===
 @tool
@@ -236,5 +181,5 @@ Always focus on Budapest. Never include information about locations outside of B
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
-tools = [parse_input_tool, directions_tool, attractions_tool, attraction_info_tool, get_schedule_tool]
+tools = [parse_input_tool, directions_tool, attractions_tool, attraction_info_tool]
 budapest_agent = Agent(model, tools, system=prompt)
