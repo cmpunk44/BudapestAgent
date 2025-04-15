@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, An
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
+from gtfs_loader import gtfs
 
 # === 1. API kulcsok betöltése ===
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
