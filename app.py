@@ -5,6 +5,7 @@ import json
 import re
 from agent import budapest_agent
 from langchain_core.messages import ToolMessage
+from streamlit.runtime.scriptrunner import rerun
 
 # === CSS stílusok (rögzített input + scrollozható chat) ===
 st.markdown("""
@@ -86,7 +87,7 @@ with right_col:
                             budapest_agent.add_user_message(user_input)
                             result = budapest_agent.run()
                             budapest_agent.history.append(result["messages"][-1])
-                            st.experimental_rerun()
+                            rerun()
                         except Exception as e:
                             st.error(f"Hiba történt: {str(e)}")
 
