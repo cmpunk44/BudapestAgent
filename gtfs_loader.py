@@ -1,15 +1,28 @@
+# gtfs_loader.py
+
 import pandas as pd
+import requests
+import io
 
-BASE_URL = "https://wgcyfjhtsmtaizsqveuw.supabase.co/storage/v1/object/public/gtfs"
+def fetch_csv(url):
+    res = requests.get(url)
+    res.raise_for_status()
+    return pd.read_csv(io.StringIO(res.content.decode("utf-8")))
 
-def load_gtfs_tables(base_url: str) -> dict:
+# Supabase base URL (note: double slashes are preserved from your links)
+BASE_URL = "https://wgcyfjhtsmtaizsqveuw.supabase.co/storage/v1/object/public/gtfs//"
+
+def load_gtfs_tables() -> dict:
     return {
-        "stops": pd.read_csv(f"{base_url}/stops.txt"),
-        "routes": pd.read_csv(f"{base_url}/routes.txt"),
-        "trips": pd.read_csv(f"{base_url}/trips.txt"),
-        "stop_times": pd.read_csv(f"{base_url}/stop_times.txt"),
-        "calendar": pd.read_csv(f"{base_url}/calendar.txt"),
+        "agency": fetch_csv(BASE_URL + "agency.txt"),
+        "calendar_dates": fetch_csv(BASE_URL + "calendar_dates.txt"),
+        "routes": fetch_csv(BASE_URL + "routes.txt"),
+        "shapes": fetch_csv(BASE_URL + "shapes.txt"),
+        "stops": fetch_csv(BASE_URL + "stops.txt"),
+        "trips": fetch_csv(BASE_URL + "trips.txt"),
+        # Note: stop_times.txt is missing; can be added when uploaded
     }
 
-# Preload once when the module is imported
-gtfs = load_gtfs_tables(BASE_URL)
+# Load once when the module is imported
+gtfs = load_gtfs_tables()
+
