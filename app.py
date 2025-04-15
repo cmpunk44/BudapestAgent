@@ -36,4 +36,16 @@ with col1:
 with col2:
     if st.button("🧹 Törlés"):
         budapest_agent.reset_history()
+with st.expander("🛠️ Tool Call Debug"):
+    history = budapest_agent.get_history()
+    tool_calls = [msg for msg in history if msg.type == "tool"]
 
+    if not tool_calls:
+        st.info("No tool calls in this conversation yet.")
+    else:
+        for i, msg in enumerate(tool_calls):
+            st.markdown(f"**🔧 Tool #{i+1}: `{msg.name}`**")
+            try:
+                st.json(json.loads(msg.content))
+            except:
+                st.code(msg.content)
