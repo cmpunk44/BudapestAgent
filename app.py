@@ -1,4 +1,6 @@
 import streamlit as st
+st.set_page_config(page_title="Budapest Agent", layout="wide")
+left_col, right_col = st.columns([1, 2])
 import json
 import re
 from agent import budapest_agent
@@ -35,9 +37,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# === Oldalelrendezés ===
-st.set_page_config(page_title="Budapest Agent", layout="wide")
-left_col, right_col = st.columns([1, 2])
 
 # === 🐞 BAL PANEL: DEBUG TOOL INFO ===
 with left_col:
