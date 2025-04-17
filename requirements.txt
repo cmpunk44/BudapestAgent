@@ -4,3 +4,9 @@ langchain_core
 langgraph
 python-dotenv
 requests
+# GTFS realtime handling
+gtfs-realtime-bindings==0.0.7
+protobuf>=3.20.0  # for compatibility with .pb files
+
+# Data handling
+pandas>=2.0.0
