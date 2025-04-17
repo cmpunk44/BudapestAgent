@@ -94,6 +94,70 @@ Return a list where each name is followed by its description.
     response = gpt4_model.invoke([HumanMessage(content=prompt)])
     return {"info": response.content}
 
+from google.transit import gtfs_realtime_pb2
+import pandas as pd
+import time
+
+@tool
+def get_schedule_tool(route_name: str, stop_name: str) -> dict:
+    """
+    Returns the next 5 real-time departure times for a given BKK route and stop.
+    Requires GTFS static files: routes.txt, stops.txt
+    Requires GTFS-RT API key in .env as BKK_API_KEY
+    """
+    try:
+        # Load GTFS static data
+        routes_df = pd.read_csv("routes.txt")
+        stops_df = pd.read_csv("stops.txt")
+
+        # Match route_id from short name
+        route_row = routes_df[routes_df["route_short_name"] == route_name]
+        if route_row.empty:
+            return {"error": f"No GTFS route found with short name '{route_name}'."}
+        route_id = route_row["route_id"].values[0]
+
+        # Match stop_id from stop name
+        stop_row = stops_df[stops_df["stop_name"] == stop_name]
+        if stop_row.empty:
+            return {"error": f"No GTFS stop found with name '{stop_name}'."}
+        stop_id = stop_row["stop_id"].values[0]
+
+        # Load GTFS-realtime TripUpdates
+        api_key = os.getenv("BKK_API_KEY")
+        if not api_key:
+            return {"error": "Missing BKK_API_KEY in environment."}
+
+        url = f"https://go.bkk.hu/api/query/v1/ws/gtfs-rt/full/TripUpdates.pb?key={api_key}"
+        response = requests.get(url)
+        if response.status_code != 200:
+            return {"error": "GTFS-realtime API request failed."}
+
+        # Parse the binary protobuf feed
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(response.content)
+
+        # Collect departure times
+        departures = []
+        for entity in feed.entity:
+            if entity.HasField("trip_update"):
+                trip = entity.trip_update
+                if trip.trip.route_id == route_id:
+                    for stu in trip.stop_time_update:
+                        if stu.stop_id == stop_id and stu.HasField("departure"):
+                            ts = stu.departure.time
+                            departures.append(time.strftime('%H:%M', time.localtime(ts)))
+
+        if not departures:
+            return {"message": f"No departures currently available for {route_name} at {stop_name}."}
+
+        return {
+            "route": route_name,
+            "stop": stop_name,
+            "next_departures": departures[:5]
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
 
 # === 7. Tool dekorátorok ===
 @tool
