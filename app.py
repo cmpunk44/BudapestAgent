@@ -61,15 +61,12 @@ with st.sidebar:
             st.rerun()
             
     with col2:
-        if st.button("📅 Útiterv / Itinerary", use_container_width=True,
+        if st.button("📅 Útiterv", use_container_width=True,
                     type="primary" if st.session_state.active_tab == "itinerary" else "secondary"):
             set_tab("itinerary")
             st.rerun()
     
     st.markdown("---")
-    
-    # Language selection
-    language = st.radio("Nyelv / Language:", ["Magyar", "English"], horizontal=True)
     
     # Settings in an expandable section
     with st.expander("Beállítások / Settings"):
