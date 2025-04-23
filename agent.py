@@ -1,4 +1,4 @@
-# agent.py improvements
+# agent.py
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -9,7 +9,6 @@ import re
 import requests
 import operator
 from typing import TypedDict, Annotated, List, Dict, Any
-from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
@@ -111,20 +110,7 @@ def get_local_attractions(lat: float, lng: float, category: str = "tourist_attra
         return {"places": places}
     return {"error": "Places API failed", "places": []}
 
-# === 6. Tool: Weather API ===
-def get_weather(location: str = "Budapest") -> dict:
-    """Gets current weather for Budapest or specified location."""
-    # This would normally use a weather API like OpenWeatherMap
-    # For this example, we'll return mock data
-    return {
-        "location": location,
-        "temperature": 22,
-        "condition": "sunny",
-        "humidity": 65,
-        "wind": "8 km/h"
-    }
-
-# === 7. Tool dekorátorok ===
+# === 6. Tool dekorátorok ===
 @tool
 def parse_input_tool(text: str) -> dict:
     """Parses user input and extracts 'from' and 'to' destinations."""
@@ -151,18 +137,16 @@ def attractions_tool(lat: float, lng: float, category: str = "tourist_attraction
     """
     return get_local_attractions(lat, lng, category, radius)
 
-@tool
-def weather_tool(location: str = "Budapest") -> dict:
-    """Gets current weather information.
-    Args:
-        location: City name (default: Budapest)
-    """
-    return get_weather(location)
-
-# === 8. Result formatter tool ===
+# === 7. Result formatter tool ===
 @tool
 def format_route_summary(route_data: Dict[str, Any]) -> str:
     """Formats route data into a user-friendly summary."""
+    if not isinstance(route_data, dict):
+        try:
+            route_data = json.loads(route_data)
+        except:
+            return "Hibás útvonal adat formátum."
+    
     if "error" in route_data:
         return f"Hiba történt: {route_data['error']}"
         
@@ -200,15 +184,11 @@ def format_route_summary(route_data: Dict[str, Any]) -> str:
     
     return summary
 
-# === 9. AgentState ===
+# === 8. AgentState ===
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
-    from_place: str
-    to_place: str
-    locations: List[Dict[str, float]]
-    recommendations: List[Dict]
 
-# === 10. Agent osztály kibővítve ===
+# === 9. Agent osztály ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
@@ -225,7 +205,7 @@ class Agent:
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
-        return hasattr(result, 'tool_calls') and len(result.tool_calls) > 0
+        return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
 
     def call_openai(self, state: AgentState):
         messages = state['messages']
@@ -240,7 +220,7 @@ class Agent:
         results = []
         for t in tool_calls:
             if t['name'] not in self.tools:
-                result = "Invalid tool name. Retry."
+                result = f"Invalid tool name: {t['name']}. Retry."
             else:
                 try:
                     result = self.tools[t['name']].invoke(t['args'])
@@ -249,7 +229,7 @@ class Agent:
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         return {'messages': results}
 
-# === 11. Agent példány kibővített prompttal ===
+# === 10. Agent példány kibővített prompttal ===
 prompt = """
 You are a helpful Hungarian assistant for Budapest public transport and sightseeing.
 You help tourists and locals navigate Budapest and discover interesting places.
@@ -267,8 +247,6 @@ Follow these steps when responding to users:
    - Call attractions_tool with relevant coordinates
    - If the user specifies a category (restaurants, cafes, etc.), use that category
    
-4. If the user asks about weather, use weather_tool
-
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
 
@@ -280,7 +258,6 @@ tools = [
     parse_input_tool, 
     directions_tool, 
     attractions_tool, 
-    weather_tool, 
     format_route_summary
 ]
 budapest_agent = Agent(model, tools, system=prompt)
