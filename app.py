@@ -56,13 +56,13 @@ with st.sidebar:
         # Debug mode toggle
         debug_mode = st.toggle("Developer Mode", value=False)
         
-        # Show tool calls in chat
-        show_tools = st.toggle("Eszközhívások mutatása a chatben", value=True)
-        
     st.caption("© 2025 Budapest Explorer - Pannon Egyetem")
 
 # Main page title
 st.title("🇭🇺 Budapest Explorer")
+
+# Define show_tools variable (always True now that toggle is removed)
+show_tools = True
 
 # Layout based on debug mode
 if debug_mode:
@@ -161,7 +161,10 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
             
             try:
                 # Track tool usage for debugging
-                current_debug_info = []
+                current_debug_info = {
+                    "user_query": agent_input.content,
+                    "steps": []
+                }
                 tool_summary = []
                 
                 # Run the agent
@@ -178,7 +181,7 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                     if hasattr(message, 'tool_calls') and message.tool_calls:
                         for tool_call in message.tool_calls:
                             # Add to debug info
-                            current_debug_info.append({
+                            current_debug_info["steps"].append({
                                 "tool": tool_call["name"],
                                 "args": tool_call["args"],
                                 "step": "tool_call"
@@ -202,23 +205,20 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                                 tool_summary.append(f"🛠️ **{tool_name}**({arg_str})")
                             
                     elif isinstance(message, ToolMessage):
-                        current_debug_info.append({
+                        current_debug_info["steps"].append({
                             "tool": message.name,
                             "result": message.content,
                             "step": "tool_result"
                         })
                 
                 # Add debug info to session state
-                st.session_state.debug_info.append({
-                    "user_query": agent_input.content,
-                    "steps": current_debug_info
-                })
+                st.session_state.debug_info.append(current_debug_info)
                 
-                # Display the response with tool summary if enabled
+                # Display the response with tool summary
                 response_content = final_response.content
                 
-                # If tool summary exists and tools should be shown, add it
-                if show_tools and tool_summary:
+                # If tool summary exists, add it to the response
+                if tool_summary:
                     tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
                     response_with_tools = response_content + tool_section
                     st.write(response_with_tools)
