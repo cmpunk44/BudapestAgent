@@ -110,7 +110,46 @@ def get_local_attractions(lat: float, lng: float, category: str = "tourist_attra
         return {"places": places}
     return {"error": "Places API failed", "places": []}
 
-# === 6. Tool dekorátorok ===
+# === 6. Helper function to extract attraction names ===
+def extract_attraction_names(text: str) -> list:
+    """Extracts potential attraction names from user query."""
+    prompt = f"""
+    You are a specialized assistant for Budapest tourism.
+    From the following text, extract any mentioned or implied Budapest attractions, landmarks, or places of interest.
+    Return ONLY a JSON array of attraction names, with no additional text.
+    
+    Example output: ["Parliament Building", "Buda Castle"]
+    
+    Text: "{text}"
+    """
+    messages = [HumanMessage(content=prompt)]
+    response = llm.invoke(messages)
+    
+    try:
+        # Try to parse JSON array from response
+        attractions = json.loads(response.content)
+        if isinstance(attractions, list):
+            return attractions
+    except:
+        # If not valid JSON, try to extract from text
+        try:
+            # Look for anything that appears to be a JSON array
+            match = re.search(r'\[(.*?)\]', response.content)
+            if match:
+                items = match.group(1).split(',')
+                return [item.strip(' "\'') for item in items if item.strip()]
+        except:
+            pass
+    
+    # Fallback: if specific attractions are mentioned in the original text, use regex
+    # to find potential proper nouns (capitalize words)
+    potential_attractions = re.findall(r'([A-Z][a-zA-Záéíóöőúüű]+(?:\s+[A-Z][a-zA-Záéíóöőúüű]+)*)', text)
+    if potential_attractions:
+        return potential_attractions[:3]  # Limit to avoid excessive false positives
+    
+    return []
+
+# === 7. Tool dekorátorok ===
 @tool
 def parse_input_tool(text: str) -> dict:
     """Parses user input and extracts 'from' and 'to' destinations."""
@@ -137,19 +176,30 @@ def attractions_tool(lat: float, lng: float, category: str = "tourist_attraction
     """
     return get_local_attractions(lat, lng, category, radius)
 
-# === NEW: Web Search Tool for Attraction Information ===
+@tool
+def extract_attractions_tool(text: str) -> list:
+    """Extracts attraction names from the user's query.
+    Args:
+        text: The user's query text
+    """
+    return extract_attraction_names(text)
+
+# === Web Search Tool for Attraction Information ===
 @tool
 def attraction_info_tool(attractions: list) -> dict:
     """
-    Provides short Budapest-specific descriptions for a list of attractions.
+    Provides short Budapest-specific descriptions for a list of attractions using web search.
     Input: list of attraction names (strings).
-    Output: dict with name → description pairs.
+    Output: dict with "info" containing descriptions of the attractions.
     
     Args:
         attractions: A list of attraction names to get information about
     """
-    if not attractions:
-        return {"info": {}}
+    if not attractions or len(attractions) == 0:
+        return {"info": "No attractions specified.", "source": "web search"}
+    
+    # Log what we're searching for
+    print(f"Searching web for information about: {attractions}")
     
     prompt = f"""
 You are a tourist assistant specialized in Budapest.
@@ -158,11 +208,24 @@ Please provide a short (max 3 sentences) Budapest-specific description for each 
 Focus ONLY on Budapest context. No global or irrelevant content.
 Return a list where each name is followed by its description.
 """
-    gpt4_model = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY)
-    response = gpt4_model.invoke([HumanMessage(content=prompt)])
-    return {"info": response.content}
+    try:
+        # Use the search-capable model
+        gpt4_model = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY)
+        response = gpt4_model.invoke([HumanMessage(content=prompt)])
+        
+        return {
+            "info": response.content,
+            "source": "web search",
+            "attractions": attractions
+        }
+    except Exception as e:
+        return {
+            "info": f"Error retrieving information: {str(e)}",
+            "source": "error",
+            "attractions": attractions
+        }
 
-# === 7. Result formatter tool ===
+# === Result formatter tool ===
 @tool
 def format_route_summary(route_data: Dict[str, Any]) -> str:
     """Formats route data into a user-friendly summary."""
@@ -260,28 +323,33 @@ You are a helpful Hungarian assistant for Budapest public transport and sightsee
 You help tourists and locals navigate Budapest and discover interesting places.
 
 Follow these steps when responding to users:
-1. Parse the user's request to understand what they're asking for
-2. For route planning:
+
+1. For route planning:
    - Extract origin and destination from user input using parse_input_tool
    - Call directions_tool with both locations to get a route
    - Format the route results in a user-friendly way with format_route_summary
    - If the user specifies a transportation mode (walking, bicycling, driving), use that mode
 
-3. For attraction recommendations:
+2. For attraction recommendations:
    - Get coordinates from the route data
    - Call attractions_tool with relevant coordinates
    - If the user specifies a category (restaurants, cafes, etc.), use that category
    - After getting attractions, use attraction_info_tool to get accurate descriptions
 
-4. For specific information about attractions:
-   - When users ask for details about specific places, use attraction_info_tool
-   - This tool uses web search to provide accurate, up-to-date information
-   - Always prefer using this tool over generating information from your knowledge
+3. For specific information about attractions:
+   - ALWAYS use extract_attractions_tool first to identify attraction names in the query
+   - Then ALWAYS use attraction_info_tool with those attraction names
+   - When showing attraction information, CLEARLY mention you got this from web search
+   - NEVER skip this step or try to use your general knowledge instead
+
+IMPORTANT RULES:
+- When users ask about specific attractions or places in Budapest, ALWAYS use the web search capability
+- First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
+- Explicitly state that information comes from "web search" in your responses
+- If a user asks for information about an attraction, never respond without using attraction_info_tool
    
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
-
-Call tools explicitly with correct arguments. Use multiple tools if needed.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
@@ -289,7 +357,8 @@ tools = [
     parse_input_tool, 
     directions_tool, 
     attractions_tool,
-    attraction_info_tool,  # Add the new search tool
+    extract_attractions_tool,  # Add the extraction tool
+    attraction_info_tool,      # Add the search tool
     format_route_summary
 ]
 budapest_agent = Agent(model, tools, system=prompt)
