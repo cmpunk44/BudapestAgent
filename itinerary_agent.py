@@ -24,7 +24,7 @@ from agent import (
 
 # Initialize the LLMs - regular for planning and search-enabled for attraction info
 planning_llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
-search_llm = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY, temperature=0.2)
+search_llm = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY)
 
 # System prompt for itinerary planning
 ITINERARY_PROMPT = """
