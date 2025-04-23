@@ -162,6 +162,7 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
             try:
                 # Track tool usage for debugging
                 current_debug_info = []
+                tool_summary = []
                 
                 # Run the agent
                 result = budapest_agent.graph.invoke(
@@ -172,15 +173,34 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                 # Get the final response
                 final_response = result["messages"][-1]
                 
-                # Track tool calls for debugging
+                # Track tool calls for debugging and summary
                 for message in result["messages"]:
                     if hasattr(message, 'tool_calls') and message.tool_calls:
                         for tool_call in message.tool_calls:
+                            # Add to debug info
                             current_debug_info.append({
                                 "tool": tool_call["name"],
                                 "args": tool_call["args"],
                                 "step": "tool_call"
                             })
+                            
+                            # Add to summary for chat display
+                            tool_name = tool_call["name"]
+                            args = tool_call["args"]
+                            
+                            # Format differently based on tool
+                            if tool_name == "attraction_info_tool":
+                                if isinstance(args, dict) and 'attractions' in args:
+                                    attractions = args['attractions']
+                                    tool_summary.append(f"🔍 **Web keresés**: {attractions}")
+                                else:
+                                    tool_summary.append(f"🔍 **Web keresés**: {args}")
+                            else:
+                                arg_str = str(args)
+                                if len(arg_str) > 50:
+                                    arg_str = arg_str[:50] + "..."
+                                tool_summary.append(f"🛠️ **{tool_name}**({arg_str})")
+                            
                     elif isinstance(message, ToolMessage):
                         current_debug_info.append({
                             "tool": message.name,
@@ -194,11 +214,21 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                     "steps": current_debug_info
                 })
                 
-                # Display the response
-                st.write(final_response.content)
+                # Display the response with tool summary if enabled
+                response_content = final_response.content
                 
-                # Add to chat history
-                st.session_state.messages.append(AIMessage(content=final_response.content))
+                # If tool summary exists and tools should be shown, add it
+                if show_tools and tool_summary:
+                    tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
+                    response_with_tools = response_content + tool_section
+                    st.write(response_with_tools)
+                    
+                    # Add to chat history
+                    st.session_state.messages.append(AIMessage(content=response_with_tools))
+                else:
+                    # Just show the regular response
+                    st.write(response_content)
+                    st.session_state.messages.append(AIMessage(content=response_content))
                 
             except Exception as e:
                 # Simple error handling
