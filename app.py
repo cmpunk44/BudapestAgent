@@ -51,8 +51,11 @@ with st.sidebar:
         # Debug mode toggle
         debug_mode = st.toggle("Developer Mode", value=False)
         
-        # NEW: Option to show tool calls in chat
+        # Show tool calls in chat
         show_tools = st.toggle("Eszközhívások mutatása a chatben", value=True)
+        
+        # NEW: Show reasoning
+        show_reasoning = st.toggle("Gondolkodási folyamat mutatása", value=True)
         
     st.caption("© 2025 Budapest Explorer - Pannon Egyetem")
 
@@ -87,6 +90,13 @@ if debug_mode:
         if st.session_state.debug_info:
             for i, interaction in enumerate(st.session_state.debug_info):
                 with st.expander(f"Query {i+1}: {interaction['user_query'][:30]}...", expanded=(i == len(st.session_state.debug_info)-1)):
+                    # Display reasoning if available
+                    if "reasoning" in interaction and interaction["reasoning"]:
+                        st.markdown("### 🧠 Reasoning Process")
+                        st.json(interaction["reasoning"])
+                        st.markdown("---")
+                    
+                    # Display tool calls
                     for step in interaction['steps']:
                         if step['step'] == 'tool_call':
                             st.markdown(f"**🔧 Tool Called: `{step['tool']}`**")
@@ -160,12 +170,15 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                 
                 # Execute the agent and collect all intermediate steps
                 result = budapest_agent.graph.invoke(
-                    {"messages": all_messages},
+                    {"messages": all_messages, "reasoning": None},
                     {"recursion_limit": 15}  # Increased recursion limit to handle more complex flows
                 )
                 
                 # Extract the final response
                 final_response = result["messages"][-1]
+                
+                # Extract reasoning if available
+                reasoning_data = result.get("reasoning", None)
                 
                 # Track web search usage specifically
                 web_search_used = False
@@ -203,6 +216,8 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                             # Special formatting for certain tools
                             if tool_name == "attraction_info_tool":
                                 tool_summary.append(f"🔍 **Web keresés**: {tool_args.get('attractions', 'Látnivalók')}")
+                            elif tool_name == "analyze_intent_tool":
+                                tool_summary.append(f"🧠 **Gondolkodási folyamat**: Felhasználói szándék elemzése")
                             else:
                                 tool_summary.append(f"🛠️ **{tool_name}**({args_str})")
                             
@@ -227,55 +242,20 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                 st.session_state.debug_info.append({
                     "user_query": agent_input.content,
                     "steps": current_debug_info,
-                    "web_search_used": web_search_used
+                    "web_search_used": web_search_used,
+                    "reasoning": reasoning_data
                 })
                 
                 # Display the response
                 response_content = final_response.content
+                final_display_content = response_content
                 
-                # If web search was used, add clear indicator to the response content
-                if web_search_used and web_search_result:
-                    # Create a highlighted web search section
-                    web_search_notice = "\n\n---\n"
-                    web_search_notice += "ℹ️ **Web keresés eredménye**:\n"
-                    web_search_notice += f"A következő információkat webes keresés segítségével találtam a(z) "
-                    web_search_notice += ", ".join([f"**{attraction}**" for attraction in web_search_attractions])
-                    web_search_notice += " látnivaló(k)ról:\n\n"
-                    web_search_notice += f"```\n{web_search_result}\n```\n"
+                # If reasoning should be shown and is available, add it to the top of the response
+                if show_reasoning and reasoning_data and 'reasoning' in reasoning_data:
+                    reasoning_section = "\n\n---\n"
+                    reasoning_section += "### 🧠 Gondolkodási folyamat\n\n"
+                    reasoning_section += f"**Szándék:** {reasoning_data.get('intent', 'Ismeretlen')}\n\n"
+                    reasoning_section += f"**Indoklás:**\n{reasoning_data.get('reasoning', 'Nem elérhető')}\n\n"
                     
-                    # Prepend this to the response
-                    response_with_notice = response_content
-                    
-                    # Only add the web search notice if it's not already mentioned
-                    if "Web keresés eredménye" not in response_content:
-                        response_with_notice = web_search_notice + response_content
-                    
-                    st.write(response_with_notice)
-                    # Add to chat history with web search notice
-                    st.session_state.messages.append(AIMessage(content=response_with_notice))
-                else:
-                    # If show tools is enabled, append the tool summary to the response
-                    if 'show_tools' in locals() and show_tools and tool_summary:
-                        tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
-                        response_with_tools = response_content + tool_section
-                        st.write(response_with_tools)
-                        # Add to chat history with tools
-                        st.session_state.messages.append(AIMessage(content=response_with_tools))
-                    else:
-                        # Just show the regular response
-                        st.write(response_content)
-                        # Add to chat history without tools
-                        st.session_state.messages.append(AIMessage(content=response_content))
-                
-            except Exception as e:
-                st.error(f"Hiba történt: {str(e)}")
-                st.session_state.messages.append(AIMessage(content=f"Sajnos hiba történt: {str(e)}"))
-                
-            # We need to rerun to reset the "waiting for response" state
-            st.rerun()
-
-# Add footer
-st.markdown("---")
-cols = st.columns(3)
-with cols[1]:
-    st.caption("Fejlesztette: Szalay Miklós Márton | Pannon Egyetem")
+                    if 'tools' in reasoning_data and reasoning_data['tools']:
+                        reasoning_section += f"
