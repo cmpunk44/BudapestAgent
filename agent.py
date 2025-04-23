@@ -8,7 +8,7 @@ import json
 import re
 import requests
 import operator
-from typing import TypedDict, Annotated, List, Dict, Any, Optional, Tuple, Union
+from typing import TypedDict, Annotated, List, Dict, Any, Optional, Tuple, Union, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage, AIMessage
 from langchain_openai import ChatOpenAI
@@ -149,140 +149,7 @@ def extract_attraction_names(text: str) -> list:
     
     return []
 
-# === 7. Reasoning function to analyze user input ===
-def analyze_user_intent(text: str) -> Dict[str, Any]:
-    """Analyzes user query to determine intent and appropriate tool selection."""
-    
-    prompt = f"""
-    You are a Budapest tourism assistant that analyzes user queries to determine the most appropriate tools to use.
-    
-    For the following query, analyze what the user wants and suggest the best tools to use.
-    Consider these possible intents:
-    1. Route planning (user wants to get from place A to place B)
-    2. Finding attractions near a location
-    3. Information about specific attractions
-    4. Finding restaurants/cafes/other venues
-    
-    For your response, return a JSON object with:
-    - "intent": The primary intent of the query
-    - "reasoning": Your step-by-step reasoning about why this is the intent
-    - "tools": Array of recommended tools to use in order
-    - "entities": Any relevant entities extracted (places, attractions, etc.)
-    
-    Query: "{text}"
-    """
-    
-    messages = [HumanMessage(content=prompt)]
-    response = llm.invoke(messages)
-    
-    try:
-        # Try to parse JSON from response
-        analysis = json.loads(response.content.strip())
-        # Ensure required keys exist
-        required_keys = ["intent", "reasoning", "tools"]
-        if all(key in analysis for key in required_keys):
-            return analysis
-    except Exception as e:
-        print(f"Error parsing analysis: {e}")
-        pass
-    
-    # If parsing fails, return a basic analysis
-    return {
-        "intent": "unknown",
-        "reasoning": "Could not determine intent with confidence.",
-        "tools": [],
-        "entities": []
-    }
-
-# === 8. Reasoning function for next steps ===
-def reason_next_steps(context: Dict[str, Any]) -> Dict[str, Any]:
-    """Analyzes the current state and determines the next step."""
-    
-    # Extract the conversation history
-    messages = context.get("messages", [])
-    
-    # Get last few messages for context
-    last_messages = messages[-10:] if len(messages) > 10 else messages
-    
-    # Format the messages for the prompt
-    formatted_messages = []
-    for msg in last_messages:
-        if isinstance(msg, HumanMessage):
-            formatted_messages.append(f"User: {msg.content}")
-        elif isinstance(msg, AIMessage):
-            formatted_messages.append(f"Assistant: {msg.content}")
-        elif isinstance(msg, ToolMessage):
-            formatted_messages.append(f"Tool ({msg.name}): {msg.content[:300]}...")
-    
-    conversation_context = "\n".join(formatted_messages)
-    
-    prompt = f"""
-    You are a reasoning engine for a Budapest tourism assistant.
-    
-    Based on the conversation so far and the current state, determine:
-    1. What has been accomplished so far
-    2. What information is still needed
-    3. What should be the next tool to use (if any)
-    4. What is the overall plan to complete the user's request
-    
-    Conversation context:
-    {conversation_context}
-    
-    Return a JSON object with:
-    - "progress": Assessment of what's been done so far
-    - "reasoning": Your step-by-step reasoning about what to do next
-    - "next_tools": Array of recommended tools to use next (if any)
-    - "plan": The overall plan to complete the request
-    """
-    
-    messages = [HumanMessage(content=prompt)]
-    response = llm.invoke(messages)
-    
-    try:
-        # Try to parse JSON from response
-        analysis = json.loads(response.content.strip())
-        return analysis
-    except Exception as e:
-        print(f"Error in reason_next_steps: {e}")
-        # If parsing fails, return a basic analysis
-        return {
-            "progress": "In progress",
-            "reasoning": "Continuing with the conversation",
-            "next_tools": [],
-            "plan": "Complete user request"
-        }
-
-# === 9. Tool dekorátorok ===
-@tool
-def reasoning_tool(query: str) -> dict:
-    """Analyzes the user's query to determine intent and reasoning.
-    Args:
-        query: The user's query text
-    """
-    analysis = analyze_user_intent(query)
-    return {
-        "analysis_type": "initial_reasoning",
-        "intent": analysis.get("intent", "unknown"),
-        "reasoning": analysis.get("reasoning", ""),
-        "recommended_tools": analysis.get("tools", []),
-        "entities": analysis.get("entities", [])
-    }
-
-@tool
-def next_step_tool(context: str) -> dict:
-    """Determines the next steps based on the current conversation state.
-    Args:
-        context: A description of the current conversation state
-    """
-    analysis = reason_next_steps({"messages": [HumanMessage(content=context)]})
-    return {
-        "analysis_type": "next_steps",
-        "progress": analysis.get("progress", ""),
-        "reasoning": analysis.get("reasoning", ""),
-        "next_tools": analysis.get("next_tools", []),
-        "plan": analysis.get("plan", "")
-    }
-
+# === 7. Tool dekorátorok ===
 @tool
 def parse_input_tool(text: str) -> dict:
     """Parses user input and extracts 'from' and 'to' destinations.
@@ -408,196 +275,297 @@ def format_route_summary(route_data: Dict[str, Any]) -> str:
     
     return summary
 
-# === 10. Custom Message Classes for Reasoning ===
-class ReasoningMessage(AIMessage):
-    """A special message type to show the agent's reasoning process."""
-    
-    reasoning_data: Dict[str, Any]
-    
-    def __init__(self, content: str, reasoning_data: Dict[str, Any]):
+# === 8. Custom ThoughtState and Message Class ===
+class ThoughtState(TypedDict):
+    """Represents the agent's current state of thinking."""
+    thought: str
+    action_plan: Optional[List[str]]
+    action: Optional[str]
+    action_input: Optional[Dict[str, Any]]
+
+class ThoughtMessage(AIMessage):
+    """A message representing the agent's internal thought process."""
+    def __init__(self, content: str, thinking: Dict[str, Any] = None):
         super().__init__(content=content)
-        self.reasoning_data = reasoning_data
-    
-    def __repr__(self):
-        return f"ReasoningMessage(content={self.content}, reasoning_data={self.reasoning_data})"
+        self.thinking = thinking if thinking else {}
 
-# === 11. AgentState ===
+# === 9. AgentState ===
 class AgentState(TypedDict):
-    messages: Annotated[list[AnyMessage], operator.add]
-    reasonings: list[Dict[str, Any]]
-    current_reasoning: Optional[Dict[str, Any]]
+    messages: Annotated[List[AnyMessage], operator.add]
+    thoughts: List[ThoughtState]
+    current_thought: Optional[ThoughtState]
 
-# === 12. Agent osztály ===
+# === 10. Agent osztály ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
         self.model = model.bind_tools(tools)
         self.tools = {t.name: t for t in tools}
-
+        
+        # Define the state machine
         graph = StateGraph(AgentState)
         
-        # Add nodes
-        graph.add_node("reason", self.reason)
-        graph.add_node("llm", self.call_openai)
-        graph.add_node("action", self.take_action)
+        # Add nodes to the graph
+        graph.add_node("think", self.think)
+        graph.add_node("act", self.act)
         
-        # Connect nodes
-        graph.add_edge("reason", "llm")
-        graph.add_conditional_edges("llm", self.exists_action, {True: "action", False: END})
-        graph.add_edge("action", "reason")  # After taking action, reason again
+        # Add edges to connect the nodes
+        graph.add_edge("think", "act")
+        graph.add_conditional_edges("act", self.should_continue, {True: "think", False: END})
         
-        graph.set_entry_point("reason")
+        # Set the entry point to start with thinking
+        graph.set_entry_point("think")
+        
         self.graph = graph.compile()
-
-    def reason(self, state: AgentState) -> AgentState:
-        """Reason about the next steps based on the current state."""
+    
+    def think(self, state: AgentState) -> AgentState:
+        """Think about what to do next based on the context."""
         messages = state.get('messages', [])
-        reasonings = state.get('reasonings', [])
+        thoughts = state.get('thoughts', [])
         
-        # If no messages, return empty state
-        if not messages:
-            return {'messages': messages, 'reasonings': [], 'current_reasoning': None}
-        
-        # Get the last user message
-        last_user_msg = None
+        # Extract the last user message
+        user_message = None
         for msg in reversed(messages):
             if isinstance(msg, HumanMessage):
-                last_user_msg = msg
+                user_message = msg.content
                 break
         
-        if not last_user_msg:
-            return {'messages': messages, 'reasonings': reasonings, 'current_reasoning': None}
+        if not user_message:
+            # No user message to respond to
+            return {'messages': messages, 'thoughts': thoughts, 'current_thought': None}
         
-        # Analyze to determine next step
-        if not reasonings:
-            # Initial reasoning
-            reasoning = analyze_user_intent(last_user_msg.content)
-            reasoning_type = "initial_reasoning"
-        else:
-            # Subsequent reasoning
-            state_context = {
-                "messages": messages,
-                "reasonings": reasonings
-            }
-            reasoning = reason_next_steps(state_context)
-            reasoning_type = "step_reasoning"
+        # Get the most recent non-thought message exchange to consider
+        relevant_context = []
+        for msg in messages:
+            if not isinstance(msg, ThoughtMessage):
+                relevant_context.append(msg)
         
-        # Add timestamp and type
-        reasoning["timestamp"] = "now"
-        reasoning["type"] = reasoning_type
+        # Create a thinking prompt to make the agent analyze the situation
+        thinking_prompt = f"""
+        As a Budapest tourism assistant, think step by step about how to address this request.
         
-        # Update reasonings list
-        updated_reasonings = reasonings + [reasoning]
+        User request: "{user_message}"
         
-        # Create a reasoning message to add to the conversation
-        reasoning_message = f"""
-🧠 **Gondolkodási folyamat**:
-
-**Szándék/Haladás**: {reasoning.get('intent', reasoning.get('progress', 'Feldolgozás'))}
-
-**Indoklás**: 
-{reasoning.get('reasoning', 'Elemzem a kérést...')}
-
-**Következő lépések**:
-{', '.join(reasoning.get('tools', reasoning.get('next_tools', ['Válasz előkészítése'])))}
----
-"""
+        Think about:
+        1. What is the user asking for? (route planning, attraction information, recommendations, etc.)
+        2. What information do I need to gather?
+        3. What tools should I use in what order?
+        4. What's my step-by-step plan?
         
-        # Add a reasoning message to the conversation
-        reasoning_msg = ReasoningMessage(content=reasoning_message, reasoning_data=reasoning)
-        updated_messages = messages + [reasoning_msg]
+        Format your thinking as:
+        
+        Thought: [Your detailed analysis of the request]
+        
+        Action Plan: [The sequence of actions/tools you'll use]
+        
+        Action: [The specific next tool to use]
+        
+        Action Input: [The exact parameters to pass to the tool]
+        """
+        
+        # Add system prompt for thinking
+        thinking_messages = [
+            SystemMessage(content="You are a helpful assistant planning how to handle a user request about Budapest tourism."),
+            HumanMessage(content=thinking_prompt)
+        ]
+        
+        # Get the agent's thinking response
+        thinking_response = llm.invoke(thinking_messages)
+        thinking_content = thinking_response.content
+        
+        # Parse the thinking response to extract structured thinking
+        thought_state = self._parse_thinking(thinking_content)
+        
+        # Create a human-readable format of the thinking for display
+        readable_thinking = f"""
+        # 🧠 Gondolkodási folyamat:
+        
+        **Elemzés:**
+        {thought_state.get('thought', 'No analysis provided')}
+        
+        **Cselekvési terv:**
+        {", ".join(thought_state.get('action_plan', ['No plan provided']))}
+        
+        **Következő lépés:**
+        {thought_state.get('action', 'No action specified')} {json.dumps(thought_state.get('action_input', {}), ensure_ascii=False)}
+        """
+        
+        # Create a thought message to add to the conversation
+        thought_message = ThoughtMessage(content=readable_thinking, thinking=thought_state)
+        
+        # Update thoughts list
+        updated_thoughts = thoughts + [thought_state]
+        
+        # Add thought message to conversation
+        updated_messages = messages + [thought_message]
         
         return {
-            'messages': updated_messages, 
-            'reasonings': updated_reasonings,
-            'current_reasoning': reasoning
+            'messages': updated_messages,
+            'thoughts': updated_thoughts,
+            'current_thought': thought_state
         }
-
-    def exists_action(self, state: AgentState):
-        if not state['messages']:
-            return False
-        result = state['messages'][-1]
-        return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
-
-    def call_openai(self, state: AgentState):
-        messages = state['messages']
-        reasonings = state.get('reasonings', [])
-        current_reasoning = state.get('current_reasoning')
+    
+    def _parse_thinking(self, thinking_content: str) -> ThoughtState:
+        """Parse the thinking content into structured parts."""
+        thought_state = {
+            "thought": "",
+            "action_plan": [],
+            "action": None,
+            "action_input": {}
+        }
         
-        # Filter out ReasoningMessages before sending to the model
-        filtered_messages = [msg for msg in messages if not isinstance(msg, ReasoningMessage)]
+        # Extract thought
+        thought_match = re.search(r'Thought:(.*?)(?:Action Plan:|Action:|$)', thinking_content, re.DOTALL)
+        if thought_match:
+            thought_state["thought"] = thought_match.group(1).strip()
         
-        # Add system message if not present
-        if self.system and not any(isinstance(msg, SystemMessage) for msg in filtered_messages):
-            system_content = self.system
+        # Extract action plan
+        plan_match = re.search(r'Action Plan:(.*?)(?:Action:|$)', thinking_content, re.DOTALL)
+        if plan_match:
+            plan_text = plan_match.group(1).strip()
+            # Split by numbered items or commas or new lines
+            items = re.split(r'\n+|\d+\.\s+|,\s*', plan_text)
+            thought_state["action_plan"] = [item.strip() for item in items if item.strip()]
+        
+        # Extract action
+        action_match = re.search(r'Action:(.*?)(?:Action Input:|$)', thinking_content, re.DOTALL)
+        if action_match:
+            action = action_match.group(1).strip()
+            # Try to match against available tool names
+            for tool_name in self.tools.keys():
+                if tool_name.lower() in action.lower():
+                    thought_state["action"] = tool_name
+                    break
             
-            # If we have current reasoning, include it in the system message
-            if current_reasoning:
-                reasoning_str = json.dumps(current_reasoning, indent=2)
-                system_content += f"\n\nCurrent reasoning analysis:\n{reasoning_str}\n\n"
-                system_content += "Use this reasoning to guide your tool selection and response strategy."
-                
-            filtered_messages = [SystemMessage(content=system_content)] + filtered_messages
+            # If no match found, use the text as is
+            if not thought_state["action"]:
+                thought_state["action"] = action
         
-        message = self.model.invoke(filtered_messages)
-        return {'messages': [message], 'reasonings': reasonings, 'current_reasoning': current_reasoning}
-
-    def take_action(self, state: AgentState):
-        tool_calls = state['messages'][-1].tool_calls
-        reasonings = state.get('reasonings', [])
-        current_reasoning = state.get('current_reasoning')
+        # Extract action input
+        input_match = re.search(r'Action Input:(.*?)$', thinking_content, re.DOTALL)
+        if input_match:
+            input_text = input_match.group(1).strip()
+            
+            # Try to parse as JSON
+            try:
+                thought_state["action_input"] = json.loads(input_text)
+            except:
+                # Try to extract key-value pairs
+                pairs = re.findall(r'(\w+):\s*([^,\n]+)', input_text)
+                if pairs:
+                    thought_state["action_input"] = {k.strip(): v.strip() for k, v in pairs}
+                else:
+                    # Use the entire text as a single parameter
+                    action = thought_state["action"]
+                    if action in self.tools:
+                        # Check if the tool expects a single string parameter
+                        thought_state["action_input"] = {"text": input_text}
         
-        results = []
-        for t in tool_calls:
-            if t['name'] not in self.tools:
-                result = f"Invalid tool name: {t['name']}. Retry."
+        return thought_state
+    
+    def act(self, state: AgentState) -> AgentState:
+        """Take action based on the current thought."""
+        messages = state.get('messages', [])
+        thoughts = state.get('thoughts', [])
+        current_thought = state.get('current_thought')
+        
+        if not current_thought or not current_thought.get('action'):
+            # Create a response message if we can't determine an action
+            response = "I'm not sure how to proceed with your request. Could you provide more details?"
+            response_message = AIMessage(content=response)
+            return {'messages': messages + [response_message], 'thoughts': thoughts, 'current_thought': None}
+        
+        action = current_thought.get('action')
+        action_input = current_thought.get('action_input', {})
+        
+        # Check if the action is a valid tool
+        if action in self.tools:
+            try:
+                # Call the tool with the provided input
+                result = self.tools[action].invoke(action_input)
+                # Create a tool message with the result
+                tool_message = ToolMessage(tool_call_id="1", name=action, content=str(result))
+                return {'messages': messages + [tool_message], 'thoughts': thoughts, 'current_thought': current_thought}
+            except Exception as e:
+                # If tool execution fails, create an error message
+                error_message = f"Error executing tool {action}: {str(e)}"
+                tool_message = ToolMessage(tool_call_id="1", name=action, content=error_message)
+                return {'messages': messages + [tool_message], 'thoughts': thoughts, 'current_thought': current_thought}
+        else:
+            # If the action is not a tool, treat it as a response
+            if action.lower() == "respond" or action.lower() == "answer":
+                # Use the action_input as the response content if available
+                content = action_input.get('text', "I'll provide an answer based on what I know.")
+                response_message = AIMessage(content=content)
+                return {'messages': messages + [response_message], 'thoughts': thoughts, 'current_thought': None}
             else:
-                try:
-                    result = self.tools[t['name']].invoke(t['args'])
-                except Exception as e:
-                    result = f"Error executing tool: {str(e)}"
-            results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
+                # Create final response based on all gathered information
+                system_prompt = self.system if self.system else "You are a helpful Hungarian assistant for Budapest tourism."
+                prompt_messages = [SystemMessage(content=system_prompt)]
+                
+                # Add relevant conversation history (filter out thinking messages)
+                for msg in messages:
+                    if not isinstance(msg, ThoughtMessage):
+                        prompt_messages.append(msg)
+                
+                # Add a prompt to generate the final response
+                prompt_messages.append(HumanMessage(content="Based on all the information gathered, provide a comprehensive response to the user's query."))
+                
+                # Generate response
+                response = self.model.invoke(prompt_messages)
+                return {'messages': messages + [response], 'thoughts': thoughts, 'current_thought': None}
+    
+    def should_continue(self, state: AgentState) -> bool:
+        """Determine if we should continue thinking or conclude the interaction."""
+        messages = state.get('messages', [])
         
-        return {'messages': results, 'reasonings': reasonings, 'current_reasoning': current_reasoning}
+        # Get the last message
+        if not messages:
+            return False
+            
+        last_message = messages[-1]
+        
+        # If the last message is a tool message, we should continue thinking
+        if isinstance(last_message, ToolMessage):
+            return True
+            
+        # If it's an AI message (a final response), we're done
+        if isinstance(last_message, AIMessage) and not isinstance(last_message, ThoughtMessage):
+            return False
+            
+        # If it's a thought message, we need to act on it
+        if isinstance(last_message, ThoughtMessage):
+            return True
+            
+        # By default, continue
+        return True
 
-# === 13. Agent példány kibővített prompttal ===
+# === 11. Agent példány ===
 prompt = """
 You are a helpful Hungarian assistant for Budapest public transport and sightseeing.
 You help tourists and locals navigate Budapest and discover interesting places.
 
-Follow the reasoning process and use the recommended tools. Your task is to:
+Your capabilities include:
+1. Route planning with Budapest public transport
+   - Use parse_input_tool to extract locations
+   - Use directions_tool to find routes
+   - Use format_route_summary to present routes clearly
 
-1. For route planning:
-   - Extract origin and destination from user input using parse_input_tool
-   - Call directions_tool with both locations to get a route
-   - Format the route results in a user-friendly way with format_route_summary
-   - If the user specifies a transportation mode (walking, bicycling, driving), use that mode
+2. Finding attractions near locations
+   - Use attractions_tool to find places of interest
+   - Recommend places based on user preferences
 
-2. For attraction recommendations:
-   - Get coordinates from the route data
-   - Call attractions_tool with relevant coordinates
-   - If the user specifies a category (restaurants, cafes, etc.), use that category
-   - After getting attractions, use attraction_info_tool to get accurate descriptions
+3. Providing information about Budapest landmarks
+   - Use extract_attractions_tool to identify attractions
+   - Use attraction_info_tool to get accurate information from the web
+   - Always prefer web search over your general knowledge
 
-3. For specific information about attractions:
-   - Use extract_attractions_tool first to identify attraction names in the query
-   - Then use attraction_info_tool with those attraction names
-   - When showing attraction information, CLEARLY mention you got this from web search
-
-IMPORTANT RULES:
-- Follow the reasoning process to determine which tools to use
-- When users ask about attractions in Budapest, always use the web search capability
-- First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
-- Explicitly state that information comes from "web search" in your responses
-   
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
 tools = [
-    reasoning_tool,
-    next_step_tool,
     parse_input_tool, 
     directions_tool, 
     attractions_tool,
