@@ -61,13 +61,14 @@ def create_itinerary(preferences):
     
     # Extract attraction names from special requests if any
     if special_requests:
-        extracted_attractions = extract_attractions_tool.invoke(special_requests)
+        # The tool requires 'text' as the parameter name
+        extracted_attractions = extract_attractions_tool(text=special_requests)
         attractions.extend(extracted_attractions)
     
     # If interests include specific categories, find more attractions
     if not attractions or len(attractions) < 3:
         # Use directions_tool to get coordinates from starting location
-        route_data = directions_tool.invoke(
+        route_data = directions_tool(
             from_place=start_location,
             to_place="Hősök tere, Budapest",  # Common tourist destination
             mode=transport_mode
@@ -82,7 +83,7 @@ def create_itinerary(preferences):
             # Get attractions for each interest category
             for interest in interests:
                 category = map_interest_to_category(interest)
-                attractions_result = attractions_tool.invoke(
+                attractions_result = attractions_tool(
                     lat=lat,
                     lng=lng,
                     category=category,
@@ -97,15 +98,19 @@ def create_itinerary(preferences):
     max_attractions = min(int(available_time) // 2 + 1, 5)
     selected_attractions = attractions[:max_attractions]
     
+    # If no attractions were found, add some default attractions
+    if not selected_attractions:
+        selected_attractions = ["Parliament", "Buda Castle", "Fisherman's Bastion"]
+    
     # Step 2: Get attraction information
-    attraction_info = attraction_info_tool.invoke(selected_attractions)
+    attraction_info = attraction_info_tool(attractions=selected_attractions)
     
     # Step 3: Plan routes between attractions
     routes = []
     current_location = start_location
     
     for attraction in selected_attractions:
-        route = directions_tool.invoke(
+        route = directions_tool(
             from_place=current_location,
             to_place=attraction + ", Budapest",
             mode=transport_mode
