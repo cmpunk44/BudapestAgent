@@ -1,3 +1,5 @@
+# agent.py improvements
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -6,10 +8,10 @@ import json
 import re
 import requests
 import operator
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, List, Dict, Any
+from dataclasses import dataclass
 
-from langchain_core.messages import HumanMessage, SystemMessage  # <- Itt a frissítés!
-from langchain_core.messages import ToolMessage, AnyMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
@@ -24,7 +26,9 @@ llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature
 # === 3. Tool: helyszínek kinyerése szövegből ===
 def parse_trip_input(user_input: str) -> dict:
     prompt = f"""
-    You are a multilingual assistant. Extract two locations from this sentence.
+    You are a multilingual assistant specializing in Hungarian location recognition.
+    Extract two locations from this sentence.
+    Be flexible with Hungarian address formats and landmarks in Budapest.
     Respond ONLY with a JSON like:
     {{"from": "X", "to": "Y"}}
     Input: "{user_input}"
@@ -36,59 +40,175 @@ def parse_trip_input(user_input: str) -> dict:
         return json.loads(response.content)
     except:
         match = re.search(r'from\s+(.*?)\s+to\s+(.*)', user_input, re.IGNORECASE)
+        if match:
+            return {"from": match.group(1), "to": match.group(2)}
+        # Try Hungarian patterns
+        match = re.search(r'(.*?)-(?:ról|ről|ból|ből|tól|től)\s+(?:a |az )?(.*?)(?:-ra|-re|-ba|-be|-hoz|-hez|-höz)?', user_input, re.IGNORECASE)
         return {"from": match.group(1), "to": match.group(2)} if match else {"from": "", "to": ""}
 
 # === 4. Tool: Directions API ===
-def get_directions(from_place: str, to_place: str) -> dict:
+def get_directions(from_place: str, to_place: str, mode: str = "transit") -> dict:
+    """Gets route using Google Directions API with specified transport mode."""
     url = "https://maps.googleapis.com/maps/api/directions/json"
+    
+    # Add Budapest to location if not specified
+    if "budapest" not in from_place.lower():
+        from_place += ", Budapest, Hungary"
+    if "budapest" not in to_place.lower():
+        to_place += ", Budapest, Hungary"
+        
     params = {
         "origin": from_place,
         "destination": to_place,
-        "mode": "transit",
-        "transit_mode": "bus|subway|train|tram",
+        "mode": mode,
+        "language": "hu",  # Hungarian language for responses
         "key": MAPS_API_KEY
     }
+    
+    # Add transit specific parameters if transit mode
+    if mode == "transit":
+        params["transit_mode"] = "bus|subway|train|tram"
+    
     response = requests.get(url, params=params)
     return response.json() if response.status_code == 200 else {"error": "Directions API failed"}
 
-# === 5. Tool: Places API ===
-def get_local_attractions(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
+# === 5. Tool: Places API with categories ===
+def get_local_attractions(lat: float, lng: float, category: str = "tourist_attraction", radius: int = 1000) -> dict:
+    """Finds places near coordinates based on specified category."""
     places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-    attractions = []
-    for lat, lng in [(start_lat, start_lng), (end_lat, end_lng)]:
-        params = {
-            "location": f"{lat},{lng}",
-            "radius": 1000,
-            "type": "tourist_attraction",
-            "key": MAPS_API_KEY
-        }
-        res = requests.get(places_url, params=params)
-        if res.status_code == 200:
-            data = res.json()
-            attractions += [r.get("name") for r in data.get("results", [])]
-    return {"attractions": attractions}
+    
+    # Map user-friendly categories to Google Places API types
+    category_map = {
+        "attractions": "tourist_attraction",
+        "restaurants": "restaurant",
+        "cafes": "cafe",
+        "museums": "museum",
+        "parks": "park",
+        "shopping": "shopping_mall",
+    }
+    
+    place_type = category_map.get(category.lower(), category)
+    
+    params = {
+        "location": f"{lat},{lng}",
+        "radius": radius,
+        "type": place_type,
+        "language": "hu",  # Hungarian language
+        "key": MAPS_API_KEY
+    }
+    
+    res = requests.get(places_url, params=params)
+    if res.status_code == 200:
+        data = res.json()
+        places = []
+        for place in data.get("results", [])[:5]:  # Limit to 5 results
+            places.append({
+                "name": place.get("name"),
+                "rating": place.get("rating", "N/A"),
+                "address": place.get("vicinity"),
+                "open_now": place.get("opening_hours", {}).get("open_now", "unknown")
+            })
+        return {"places": places}
+    return {"error": "Places API failed", "places": []}
 
-# === 6. Tool dekorátorok ===
+# === 6. Tool: Weather API ===
+def get_weather(location: str = "Budapest") -> dict:
+    """Gets current weather for Budapest or specified location."""
+    # This would normally use a weather API like OpenWeatherMap
+    # For this example, we'll return mock data
+    return {
+        "location": location,
+        "temperature": 22,
+        "condition": "sunny",
+        "humidity": 65,
+        "wind": "8 km/h"
+    }
+
+# === 7. Tool dekorátorok ===
 @tool
 def parse_input_tool(text: str) -> dict:
     """Parses user input and extracts 'from' and 'to' destinations."""
     return parse_trip_input(text)
 
 @tool
-def directions_tool(from_place: str, to_place: str) -> dict:
-    """Gets public transport route using Google Directions API."""
-    return get_directions(from_place, to_place)
+def directions_tool(from_place: str, to_place: str, mode: str = "transit") -> dict:
+    """Gets route using Google Directions API.
+    Args:
+        from_place: Starting location
+        to_place: Destination location
+        mode: Transportation mode (transit, walking, bicycling, driving)
+    """
+    return get_directions(from_place, to_place, mode)
 
 @tool
-def attractions_tool(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> dict:
-    """Finds tourist attractions near the route using Google Places API."""
-    return get_local_attractions(start_lat, start_lng, end_lat, end_lng)
+def attractions_tool(lat: float, lng: float, category: str = "tourist_attraction", radius: int = 1000) -> dict:
+    """Finds places near coordinates based on category.
+    Args:
+        lat: Latitude
+        lng: Longitude
+        category: Place category (attractions, restaurants, cafes, museums, parks, shopping)
+        radius: Search radius in meters
+    """
+    return get_local_attractions(lat, lng, category, radius)
 
-# === 7. AgentState ===
+@tool
+def weather_tool(location: str = "Budapest") -> dict:
+    """Gets current weather information.
+    Args:
+        location: City name (default: Budapest)
+    """
+    return get_weather(location)
+
+# === 8. Result formatter tool ===
+@tool
+def format_route_summary(route_data: Dict[str, Any]) -> str:
+    """Formats route data into a user-friendly summary."""
+    if "error" in route_data:
+        return f"Hiba történt: {route_data['error']}"
+        
+    if "routes" not in route_data or not route_data["routes"]:
+        return "Sajnos nem találtam útvonalat."
+        
+    route = route_data["routes"][0]
+    legs = route["legs"][0]
+    
+    duration = legs["duration"]["text"]
+    distance = legs["distance"]["text"]
+    
+    steps = []
+    for step in legs["steps"]:
+        if step.get("travel_mode") == "TRANSIT":
+            transit = step.get("transit_details", {})
+            line = transit.get("line", {}).get("short_name", "")
+            vehicle = transit.get("line", {}).get("vehicle", {}).get("name", "jármű")
+            departure = transit.get("departure_stop", {}).get("name", "")
+            arrival = transit.get("arrival_stop", {}).get("name", "")
+            steps.append(f"🚆 {line} {vehicle}: {departure} → {arrival}")
+        elif step.get("travel_mode") == "WALKING":
+            steps.append(f"🚶 Gyalogolj {step.get('duration', {}).get('text', '')}")
+    
+    summary = f"""
+    🛣️ **Útvonal: {legs['start_address']} → {legs['end_address']}**
+    ⏱️ Időtartam: {duration}
+    📏 Távolság: {distance}
+    
+    **Lépések:**
+    """
+    
+    for i, step in enumerate(steps, 1):
+        summary += f"{i}. {step}\n"
+    
+    return summary
+
+# === 9. AgentState ===
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
+    from_place: str
+    to_place: str
+    locations: List[Dict[str, float]]
+    recommendations: List[Dict]
 
-# === 8. Agent osztály ===
+# === 10. Agent osztály kibővítve ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
@@ -105,12 +225,13 @@ class Agent:
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
-        return len(result.tool_calls) > 0
+        return hasattr(result, 'tool_calls') and len(result.tool_calls) > 0
 
     def call_openai(self, state: AgentState):
         messages = state['messages']
         if self.system:
-            messages = [SystemMessage(content=self.system)] + messages
+            if not any(isinstance(msg, SystemMessage) for msg in messages):
+                messages = [SystemMessage(content=self.system)] + messages
         message = self.model.invoke(messages)
         return {'messages': [message]}
 
@@ -121,21 +242,45 @@ class Agent:
             if t['name'] not in self.tools:
                 result = "Invalid tool name. Retry."
             else:
-                result = self.tools[t['name']].invoke(t['args'])
+                try:
+                    result = self.tools[t['name']].invoke(t['args'])
+                except Exception as e:
+                    result = f"Error executing tool: {str(e)}"
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         return {'messages': results}
 
-# === 9. Agent példány ===
+# === 11. Agent példány kibővített prompttal ===
 prompt = """
-You are a helpful assistant for Budapest public transport and sightseeing.
-You can:
-- Parse origin and destination from user input
-- Call directions_tool with both locations to get route
-- Call attractions_tool with coordinates extracted from route_data (start and end lat/lng)
+You are a helpful Hungarian assistant for Budapest public transport and sightseeing.
+You help tourists and locals navigate Budapest and discover interesting places.
+
+Follow these steps when responding to users:
+1. Parse the user's request to understand what they're asking for
+2. For route planning:
+   - Extract origin and destination from user input using parse_input_tool
+   - Call directions_tool with both locations to get a route
+   - Format the route results in a user-friendly way with format_route_summary
+   - If the user specifies a transportation mode (walking, bicycling, driving), use that mode
+
+3. For attraction recommendations:
+   - Get coordinates from the route data
+   - Call attractions_tool with relevant coordinates
+   - If the user specifies a category (restaurants, cafes, etc.), use that category
+   
+4. If the user asks about weather, use weather_tool
+
+Always respond in Hungarian unless the user specifically asks in another language.
+Be helpful, friendly, and provide concise but complete information.
 
 Call tools explicitly with correct arguments. Use multiple tools if needed.
 """
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
-tools = [parse_input_tool, directions_tool, attractions_tool]
+tools = [
+    parse_input_tool, 
+    directions_tool, 
+    attractions_tool, 
+    weather_tool, 
+    format_route_summary
+]
 budapest_agent = Agent(model, tools, system=prompt)
