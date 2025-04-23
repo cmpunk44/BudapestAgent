@@ -332,6 +332,7 @@ IMPORTANT RULES:
    
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
+Finish with a follow up question.
 """
 
 # Create the model instance
