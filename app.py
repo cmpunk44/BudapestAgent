@@ -54,9 +54,11 @@ with st.sidebar:
 # Layout based on debug mode
 if debug_mode:
     # Create two columns - main chat and debug panel
-    chat_col, debug_col = st.columns([2, 1])
+    col1, col2 = st.columns([2, 1])
+    chat_col = col1
+    debug_col = col2
 else:
-    # Only use a single column for the chat
+    # Only use the main area for the chat
     chat_col = st
 
 # Main content in the chat column
@@ -150,7 +152,7 @@ with chat_col:
                     st.session_state.messages.append(AIMessage(content=f"Sajnos hiba történt: {str(e)}"))
 
 # Debug panel in the second column
-if debug_mode:
+if debug_mode and 'debug_col' in locals():
     with debug_col:
         st.title("🔍 Developer Mode")
         st.markdown("### ReAct Agent Process")
