@@ -14,7 +14,7 @@ import operator
 from typing import TypedDict, Annotated, List, Dict, Any
 
 # Import necessary LangChain components
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
@@ -142,44 +142,6 @@ def extract_attraction_names(text: str) -> list:
     
     return []
 
-def generate_tourism_followups(conversation_context: str) -> list:
-    """Generate general tourism follow-up questions based on the conversation."""
-    prompt = f"""
-    You are a Budapest tourism assistant. Based on this conversation, 
-    generate 2 follow-up questions that would help the user discover more about Budapest.
-    
-    The questions should be general tourism questions about Budapest attractions, 
-    food, transportation, or cultural experiences.
-    
-    Conversation context:
-    {conversation_context}
-    
-    Return ONLY a JSON array of 2 follow-up questions in Hungarian, with no additional text.
-    Example: ["Szeretnél többet megtudni a budapesti fürdőkről?", "Érdekelnek a közeli látnivalók is?"]
-    """
-    
-    messages = [HumanMessage(content=prompt)]
-    response = llm.invoke(messages)
-    
-    try:
-        # Try to parse JSON array from response
-        suggestions = json.loads(response.content)
-        if isinstance(suggestions, list):
-            return suggestions[:2]  # Limit to 2 suggestions
-    except:
-        # Fallback with regex
-        suggestions = re.findall(r'"([^"]+)"', response.content)
-        if suggestions:
-            return suggestions[:2]
-    
-    # Default suggestions if parsing fails
-    default_suggestions = [
-        "Szeretnél többet megtudni Budapest látnivalóiról?",
-        "Segíthetek még valamiben Budapest felfedezésében?"
-    ]
-    
-    return default_suggestions
-
 # === Register tools with LangChain's @tool decorator ===
 
 @tool
@@ -215,14 +177,6 @@ def extract_attractions_tool(text: str) -> list:
         text: The user's query text
     """
     return extract_attraction_names(text)
-
-@tool
-def tourism_followups_tool(conversation_context: str) -> list:
-    """Generates follow-up tourism questions based on the conversation.
-    Args:
-        conversation_context: Recent conversation history
-    """
-    return generate_tourism_followups(conversation_context)
 
 @tool
 def attraction_info_tool(attractions: list) -> dict:
@@ -319,22 +273,18 @@ class Agent:
         self.model = model.bind_tools(tools)
         self.tools = {t.name: t for t in tools}
 
-        # Create a simple graph with necessary nodes
+        # Create a simple graph with two nodes: LLM and action
         graph = StateGraph(AgentState)
-        
-        # Add nodes
         graph.add_node("llm", self.call_openai)  # Node for generating responses or tool calls
         graph.add_node("action", self.take_action)  # Node for executing tools
-        graph.add_node("add_followups", self.add_followups)  # Node for adding follow-up questions
         
         # Add edges to define the flow
         graph.add_conditional_edges(
             "llm",  # From the LLM node
             self.exists_action,  # Check if there's a tool to call
-            {True: "action", False: "add_followups"}  # If yes, go to action; if no, add followups
+            {True: "action", False: END}  # If yes, go to action; if no, end
         )
         graph.add_edge("action", "llm")  # After action, go back to LLM
-        graph.add_edge("add_followups", END)  # After adding followups, end
         
         # Set the entry point
         graph.set_entry_point("llm")
@@ -382,55 +332,6 @@ class Agent:
             
         # Return the updated state with the tool results
         return {'messages': results}
-    
-    def add_followups(self, state: AgentState):
-        """Add tourism follow-up questions to the final response."""
-        messages = state['messages']
-        
-        # If there are no messages, just return the state
-        if not messages:
-            return {'messages': messages}
-        
-        # Get the last message (should be the final response)
-        last_message = messages[-1]
-        
-        # Only process if it's an AI message (not a tool message)
-        if isinstance(last_message, AIMessage):
-            # Create conversation context from recent messages
-            context = ""
-            # Get up to 3 most recent messages, excluding the current one
-            for msg in state.get('messages', [])[-4:-1]:
-                if hasattr(msg, 'content'):
-                    if isinstance(msg, HumanMessage):
-                        context += f"User: {msg.content}\n"
-                    elif isinstance(msg, AIMessage):
-                        context += f"Assistant: {msg.content}\n"
-            
-            # Generate follow-up suggestions
-            try:
-                followup_questions = generate_tourism_followups(context)
-                
-                # Get current content
-                content = last_message.content
-                
-                # Add follow-up section if it's not already there
-                if "További kérdések" not in content:
-                    # Add a section for follow-up questions
-                    content += "\n\n---\n**További kérdések:**\n"
-                    for i, question in enumerate(followup_questions, 1):
-                        content += f"{i}. {question}\n"
-                    
-                    # Create a new message with the updated content
-                    new_message = AIMessage(content=content)
-                    
-                    # Replace the last message with our enhanced version
-                    messages[-1] = new_message
-                
-            except Exception as e:
-                # If there's an error, just return the original messages
-                pass
-        
-        return {'messages': messages}
 
 # === System prompt for the agent ===
 prompt = """
@@ -460,7 +361,6 @@ IMPORTANT RULES:
 - When users ask about attractions in Budapest, always use the web search capability
 - First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
 - Explicitly state that information comes from "web search" in your responses
-- After providing an answer, encourage the user to explore more about Budapest
    
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
@@ -476,9 +376,9 @@ tools = [
     attractions_tool,
     extract_attractions_tool,
     attraction_info_tool,
-    tourism_followups_tool,
     format_route_summary
 ]
 
 # Create the agent instance
 budapest_agent = Agent(model, tools, system=prompt)
+    
