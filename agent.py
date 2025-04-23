@@ -8,9 +8,9 @@ import json
 import re
 import requests
 import operator
-from typing import TypedDict, Annotated, List, Dict, Any, Optional, Tuple
+from typing import TypedDict, Annotated, List, Dict, Any, Optional, Tuple, Union
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
@@ -194,14 +194,94 @@ def analyze_user_intent(text: str) -> Dict[str, Any]:
         "entities": []
     }
 
-# === 8. Tool dekorátorok ===
+# === 8. Reasoning function for next steps ===
+def reason_next_steps(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Analyzes the current state and determines the next step."""
+    
+    # Extract the conversation history
+    messages = context.get("messages", [])
+    
+    # Get last few messages for context
+    last_messages = messages[-10:] if len(messages) > 10 else messages
+    
+    # Format the messages for the prompt
+    formatted_messages = []
+    for msg in last_messages:
+        if isinstance(msg, HumanMessage):
+            formatted_messages.append(f"User: {msg.content}")
+        elif isinstance(msg, AIMessage):
+            formatted_messages.append(f"Assistant: {msg.content}")
+        elif isinstance(msg, ToolMessage):
+            formatted_messages.append(f"Tool ({msg.name}): {msg.content[:300]}...")
+    
+    conversation_context = "\n".join(formatted_messages)
+    
+    prompt = f"""
+    You are a reasoning engine for a Budapest tourism assistant.
+    
+    Based on the conversation so far and the current state, determine:
+    1. What has been accomplished so far
+    2. What information is still needed
+    3. What should be the next tool to use (if any)
+    4. What is the overall plan to complete the user's request
+    
+    Conversation context:
+    {conversation_context}
+    
+    Return a JSON object with:
+    - "progress": Assessment of what's been done so far
+    - "reasoning": Your step-by-step reasoning about what to do next
+    - "next_tools": Array of recommended tools to use next (if any)
+    - "plan": The overall plan to complete the request
+    """
+    
+    messages = [HumanMessage(content=prompt)]
+    response = llm.invoke(messages)
+    
+    try:
+        # Try to parse JSON from response
+        analysis = json.loads(response.content.strip())
+        return analysis
+    except Exception as e:
+        print(f"Error in reason_next_steps: {e}")
+        # If parsing fails, return a basic analysis
+        return {
+            "progress": "In progress",
+            "reasoning": "Continuing with the conversation",
+            "next_tools": [],
+            "plan": "Complete user request"
+        }
+
+# === 9. Tool dekorátorok ===
 @tool
-def analyze_intent_tool(text: str) -> dict:
+def reasoning_tool(query: str) -> dict:
     """Analyzes the user's query to determine intent and reasoning.
     Args:
-        text: The user's query text
+        query: The user's query text
     """
-    return analyze_user_intent(text)
+    analysis = analyze_user_intent(query)
+    return {
+        "analysis_type": "initial_reasoning",
+        "intent": analysis.get("intent", "unknown"),
+        "reasoning": analysis.get("reasoning", ""),
+        "recommended_tools": analysis.get("tools", []),
+        "entities": analysis.get("entities", [])
+    }
+
+@tool
+def next_step_tool(context: str) -> dict:
+    """Determines the next steps based on the current conversation state.
+    Args:
+        context: A description of the current conversation state
+    """
+    analysis = reason_next_steps({"messages": [HumanMessage(content=context)]})
+    return {
+        "analysis_type": "next_steps",
+        "progress": analysis.get("progress", ""),
+        "reasoning": analysis.get("reasoning", ""),
+        "next_tools": analysis.get("next_tools", []),
+        "plan": analysis.get("plan", "")
+    }
 
 @tool
 def parse_input_tool(text: str) -> dict:
@@ -328,12 +408,26 @@ def format_route_summary(route_data: Dict[str, Any]) -> str:
     
     return summary
 
-# === 9. AgentState ===
+# === 10. Custom Message Classes for Reasoning ===
+class ReasoningMessage(AIMessage):
+    """A special message type to show the agent's reasoning process."""
+    
+    reasoning_data: Dict[str, Any]
+    
+    def __init__(self, content: str, reasoning_data: Dict[str, Any]):
+        super().__init__(content=content)
+        self.reasoning_data = reasoning_data
+    
+    def __repr__(self):
+        return f"ReasoningMessage(content={self.content}, reasoning_data={self.reasoning_data})"
+
+# === 11. AgentState ===
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
-    reasoning: Optional[Dict[str, Any]]
+    reasonings: list[Dict[str, Any]]
+    current_reasoning: Optional[Dict[str, Any]]
 
-# === 10. Agent osztály ===
+# === 12. Agent osztály ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
@@ -341,22 +435,28 @@ class Agent:
         self.tools = {t.name: t for t in tools}
 
         graph = StateGraph(AgentState)
-        graph.add_node("analyze", self.analyze_request)
+        
+        # Add nodes
+        graph.add_node("reason", self.reason)
         graph.add_node("llm", self.call_openai)
         graph.add_node("action", self.take_action)
         
-        # Set flow: analyze -> llm -> action -> llm (loop) -> end
-        graph.add_edge("analyze", "llm")
+        # Connect nodes
+        graph.add_edge("reason", "llm")
         graph.add_conditional_edges("llm", self.exists_action, {True: "action", False: END})
-        graph.add_edge("action", "llm")
-        graph.set_entry_point("analyze")
+        graph.add_edge("action", "reason")  # After taking action, reason again
+        
+        graph.set_entry_point("reason")
         self.graph = graph.compile()
 
-    def analyze_request(self, state: AgentState) -> AgentState:
-        """Analyze the user request to determine intent and reasoning."""
+    def reason(self, state: AgentState) -> AgentState:
+        """Reason about the next steps based on the current state."""
         messages = state.get('messages', [])
+        reasonings = state.get('reasonings', [])
+        
+        # If no messages, return empty state
         if not messages:
-            return {'messages': messages, 'reasoning': None}
+            return {'messages': messages, 'reasonings': [], 'current_reasoning': None}
         
         # Get the last user message
         last_user_msg = None
@@ -366,42 +466,88 @@ class Agent:
                 break
         
         if not last_user_msg:
-            return {'messages': messages, 'reasoning': None}
-            
-        # Analyze the user's intent
-        analysis = analyze_user_intent(last_user_msg.content)
+            return {'messages': messages, 'reasonings': reasonings, 'current_reasoning': None}
         
-        # Include reasoning in state
-        return {'messages': messages, 'reasoning': analysis}
+        # Analyze to determine next step
+        if not reasonings:
+            # Initial reasoning
+            reasoning = analyze_user_intent(last_user_msg.content)
+            reasoning_type = "initial_reasoning"
+        else:
+            # Subsequent reasoning
+            state_context = {
+                "messages": messages,
+                "reasonings": reasonings
+            }
+            reasoning = reason_next_steps(state_context)
+            reasoning_type = "step_reasoning"
+        
+        # Add timestamp and type
+        reasoning["timestamp"] = "now"
+        reasoning["type"] = reasoning_type
+        
+        # Update reasonings list
+        updated_reasonings = reasonings + [reasoning]
+        
+        # Create a reasoning message to add to the conversation
+        reasoning_message = f"""
+🧠 **Gondolkodási folyamat**:
+
+**Szándék/Haladás**: {reasoning.get('intent', reasoning.get('progress', 'Feldolgozás'))}
+
+**Indoklás**: 
+{reasoning.get('reasoning', 'Elemzem a kérést...')}
+
+**Következő lépések**:
+{', '.join(reasoning.get('tools', reasoning.get('next_tools', ['Válasz előkészítése'])))}
+---
+"""
+        
+        # Add a reasoning message to the conversation
+        reasoning_msg = ReasoningMessage(content=reasoning_message, reasoning_data=reasoning)
+        updated_messages = messages + [reasoning_msg]
+        
+        return {
+            'messages': updated_messages, 
+            'reasonings': updated_reasonings,
+            'current_reasoning': reasoning
+        }
 
     def exists_action(self, state: AgentState):
+        if not state['messages']:
+            return False
         result = state['messages'][-1]
         return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
 
     def call_openai(self, state: AgentState):
         messages = state['messages']
-        reasoning = state.get('reasoning')
+        reasonings = state.get('reasonings', [])
+        current_reasoning = state.get('current_reasoning')
+        
+        # Filter out ReasoningMessages before sending to the model
+        filtered_messages = [msg for msg in messages if not isinstance(msg, ReasoningMessage)]
         
         # Add system message if not present
-        if self.system and not any(isinstance(msg, SystemMessage) for msg in messages):
+        if self.system and not any(isinstance(msg, SystemMessage) for msg in filtered_messages):
             system_content = self.system
             
-            # If we have reasoning, include it in system message
-            if reasoning:
-                reasoning_str = json.dumps(reasoning, indent=2)
-                system_content += f"\n\nAnalysis of the user's last query:\n{reasoning_str}\n\n"
-                system_content += "Use this analysis to guide your tool selection and response strategy."
+            # If we have current reasoning, include it in the system message
+            if current_reasoning:
+                reasoning_str = json.dumps(current_reasoning, indent=2)
+                system_content += f"\n\nCurrent reasoning analysis:\n{reasoning_str}\n\n"
+                system_content += "Use this reasoning to guide your tool selection and response strategy."
                 
-            messages = [SystemMessage(content=system_content)] + messages
+            filtered_messages = [SystemMessage(content=system_content)] + filtered_messages
         
-        message = self.model.invoke(messages)
-        return {'messages': [message], 'reasoning': reasoning}
+        message = self.model.invoke(filtered_messages)
+        return {'messages': [message], 'reasonings': reasonings, 'current_reasoning': current_reasoning}
 
     def take_action(self, state: AgentState):
         tool_calls = state['messages'][-1].tool_calls
-        reasoning = state.get('reasoning')
-        results = []
+        reasonings = state.get('reasonings', [])
+        current_reasoning = state.get('current_reasoning')
         
+        results = []
         for t in tool_calls:
             if t['name'] not in self.tools:
                 result = f"Invalid tool name: {t['name']}. Retry."
@@ -412,14 +558,14 @@ class Agent:
                     result = f"Error executing tool: {str(e)}"
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         
-        return {'messages': results, 'reasoning': reasoning}
+        return {'messages': results, 'reasonings': reasonings, 'current_reasoning': current_reasoning}
 
-# === 11. Agent példány kibővített prompttal ===
+# === 13. Agent példány kibővített prompttal ===
 prompt = """
 You are a helpful Hungarian assistant for Budapest public transport and sightseeing.
 You help tourists and locals navigate Budapest and discover interesting places.
 
-Follow these steps when responding to users:
+Follow the reasoning process and use the recommended tools. Your task is to:
 
 1. For route planning:
    - Extract origin and destination from user input using parse_input_tool
@@ -434,16 +580,15 @@ Follow these steps when responding to users:
    - After getting attractions, use attraction_info_tool to get accurate descriptions
 
 3. For specific information about attractions:
-   - ALWAYS use extract_attractions_tool first to identify attraction names in the query
-   - Then ALWAYS use attraction_info_tool with those attraction names
+   - Use extract_attractions_tool first to identify attraction names in the query
+   - Then use attraction_info_tool with those attraction names
    - When showing attraction information, CLEARLY mention you got this from web search
-   - NEVER skip this step or try to use your general knowledge instead
 
 IMPORTANT RULES:
-- When users ask about specific attractions or places in Budapest, ALWAYS use the web search capability
+- Follow the reasoning process to determine which tools to use
+- When users ask about attractions in Budapest, always use the web search capability
 - First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
 - Explicitly state that information comes from "web search" in your responses
-- If a user asks for information about an attraction, never respond without using attraction_info_tool
    
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
@@ -451,7 +596,8 @@ Be helpful, friendly, and provide concise but complete information.
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
 tools = [
-    analyze_intent_tool,   # Add the intent analysis tool
+    reasoning_tool,
+    next_step_tool,
     parse_input_tool, 
     directions_tool, 
     attractions_tool,
