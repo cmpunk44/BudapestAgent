@@ -34,6 +34,10 @@ if "active_tab" not in st.session_state:
 if "itinerary" not in st.session_state:
     st.session_state.itinerary = None
 
+# Function to change tabs
+def set_tab(tab_name):
+    st.session_state.active_tab = tab_name
+    
 # Simple sidebar with app info
 with st.sidebar:
     st.title("Budapest Explorer")
@@ -42,18 +46,27 @@ with st.sidebar:
     - 🚌 Tömegközlekedési útvonaltervezés
     - 🏛️ Látnivalók ajánlása
     - 🍽️ Éttermek, kávézók keresése
-    - 📅 Útiterv készítés
     """)
     
-    # Tabs in sidebar for different functions
-    tab_selection = st.radio(
-        "Válassz funkciót / Choose function:",
-        ["Chat", "Útiterv / Itinerary"],
-        horizontal=True
-    )
+    # Add prominent tab buttons at the top of the sidebar
+    st.write("## Válassz funkciót / Choose function:")
     
-    # Update active tab based on selection
-    st.session_state.active_tab = "chat" if tab_selection == "Chat" else "itinerary"
+    # Create two columns for the buttons
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("💬 Chat", use_container_width=True, 
+                    type="primary" if st.session_state.active_tab == "chat" else "secondary"):
+            set_tab("chat")
+            st.rerun()
+            
+    with col2:
+        if st.button("📅 Útiterv / Itinerary", use_container_width=True,
+                    type="primary" if st.session_state.active_tab == "itinerary" else "secondary"):
+            set_tab("itinerary")
+            st.rerun()
+    
+    st.markdown("---")
     
     # Language selection
     language = st.radio("Nyelv / Language:", ["Magyar", "English"], horizontal=True)
