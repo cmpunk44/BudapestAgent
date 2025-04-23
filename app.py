@@ -49,6 +49,9 @@ with st.sidebar:
         # Debug mode toggle
         debug_mode = st.toggle("Developer Mode", value=False)
         
+        # NEW: Option to show tool calls in chat
+        show_tools = st.toggle("Eszközhívások mutatása a chatben", value=True)
+        
     st.caption("© 2025 Budapest Explorer - Pannon Egyetem")
 
 # Define layout
@@ -163,15 +166,31 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                 final_response = result["messages"][-1]
                 
                 # Collect all tool calls from the interaction for debugging
+                tool_summary = []
                 for message in result["messages"]:
                     if hasattr(message, 'tool_calls') and message.tool_calls:
                         for tool_call in message.tool_calls:
+                            tool_name = tool_call["name"]
+                            tool_args = tool_call["args"]
+                            
+                            # Add to debug info
                             current_debug_info.append({
-                                "tool": tool_call["name"],
-                                "args": tool_call["args"],
+                                "tool": tool_name,
+                                "args": tool_args,
                                 "step": "tool_call"
                             })
+                            
+                            # Add to tool summary for chat display
+                            if isinstance(tool_args, dict):
+                                # Format arguments as a nice string
+                                args_str = ", ".join([f"{k}: {v}" for k, v in tool_args.items()])
+                            else:
+                                args_str = str(tool_args)
+                            
+                            tool_summary.append(f"🛠️ **{tool_name}**({args_str})")
+                            
                     elif isinstance(message, ToolMessage):
+                        # Add to debug info
                         current_debug_info.append({
                             "tool": message.name,
                             "result": message.content,
@@ -185,10 +204,20 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
                 })
                 
                 # Display the response
-                st.write(final_response.content)
+                response_content = final_response.content
                 
-                # Add to chat history
-                st.session_state.messages.append(AIMessage(content=final_response.content))
+                # If show tools is enabled, append the tool summary to the response
+                if 'show_tools' in locals() and show_tools and tool_summary:
+                    tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
+                    response_with_tools = response_content + tool_section
+                    st.write(response_with_tools)
+                    # Add to chat history with tools
+                    st.session_state.messages.append(AIMessage(content=response_with_tools))
+                else:
+                    # Just show the regular response
+                    st.write(response_content)
+                    # Add to chat history without tools
+                    st.session_state.messages.append(AIMessage(content=response_content))
                 
             except Exception as e:
                 st.error(f"Hiba történt: {str(e)}")
