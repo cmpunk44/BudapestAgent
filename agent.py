@@ -14,7 +14,7 @@ import operator
 from typing import TypedDict, Annotated, List, Dict, Any
 
 # Import necessary LangChain components
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
@@ -142,25 +142,20 @@ def extract_attraction_names(text: str) -> list:
     
     return []
 
-def generate_followup_suggestions(context: str, query_type: str, destination: str = None) -> list:
-    """Generate relevant follow-up questions based on the conversation context."""
+def generate_tourism_followups(conversation_context: str) -> list:
+    """Generate general tourism follow-up questions based on the conversation."""
     prompt = f"""
-    You are a Budapest tourism assistant helping users explore the city.
-    Based on the current conversation and the user's query type, generate 2-3 natural follow-up questions 
-    that would help the user discover more about Budapest.
+    You are a Budapest tourism assistant. Based on this conversation, 
+    generate 2 follow-up questions that would help the user discover more about Budapest.
     
-    Context: {context}
-    Query type: {query_type}
-    Destination: {destination if destination else "Not specified"}
+    The questions should be general tourism questions about Budapest attractions, 
+    food, transportation, or cultural experiences.
     
-    For each question type, focus on:
-    - Route planning: Ask about attractions near the destination or transportation preferences
-    - Attractions: Ask about specific interests (history, architecture, views)
-    - Food/restaurants: Ask about cuisine preferences or dietary restrictions
-    - General: Ask about duration of stay or specific interests
+    Conversation context:
+    {conversation_context}
     
-    Return ONLY a JSON array of follow-up questions in Hungarian, with no additional text.
-    Example: ["Szeretnél megtudni valamit a környékbeli látnivalókról?", "Érdekelnének étkezési lehetőségek az útvonalon?"]
+    Return ONLY a JSON array of 2 follow-up questions in Hungarian, with no additional text.
+    Example: ["Szeretnél többet megtudni a budapesti fürdőkről?", "Érdekelnek a közeli látnivalók is?"]
     """
     
     messages = [HumanMessage(content=prompt)]
@@ -179,7 +174,7 @@ def generate_followup_suggestions(context: str, query_type: str, destination: st
     
     # Default suggestions if parsing fails
     default_suggestions = [
-        "Szeretnél többet megtudni a környékbeli látnivalókról?",
+        "Szeretnél többet megtudni Budapest látnivalóiról?",
         "Segíthetek még valamiben Budapest felfedezésében?"
     ]
     
@@ -222,14 +217,12 @@ def extract_attractions_tool(text: str) -> list:
     return extract_attraction_names(text)
 
 @tool
-def followup_suggestions_tool(context: str, query_type: str, destination: str = None) -> list:
-    """Generates follow-up questions based on the conversation context.
+def tourism_followups_tool(conversation_context: str) -> list:
+    """Generates follow-up tourism questions based on the conversation.
     Args:
-        context: The conversation context
-        query_type: The type of query (route, attraction, food, etc.)
-        destination: Optional destination mentioned in the conversation
+        conversation_context: Recent conversation history
     """
-    return generate_followup_suggestions(context, query_type, destination)
+    return generate_tourism_followups(conversation_context)
 
 @tool
 def attraction_info_tool(attractions: list) -> dict:
@@ -315,8 +308,6 @@ def format_route_summary(route_data: Dict[str, Any]) -> str:
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
     messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
-    query_type: str  # Type of the current query (route, attraction, etc.)
-    destination: str  # Destination mentioned in the query, if any
 
 # === Agent class to manage the conversation flow ===
 class Agent:
@@ -328,97 +319,37 @@ class Agent:
         self.model = model.bind_tools(tools)
         self.tools = {t.name: t for t in tools}
 
-        # Create a graph with nodes for different stages
+        # Create a simple graph with necessary nodes
         graph = StateGraph(AgentState)
         
         # Add nodes
-        graph.add_node("analyze", self.analyze_query)  # New node to analyze query
         graph.add_node("llm", self.call_openai)  # Node for generating responses or tool calls
         graph.add_node("action", self.take_action)  # Node for executing tools
-        graph.add_node("followup", self.add_followups)  # New node to add follow-up suggestions
+        graph.add_node("add_followups", self.add_followups)  # Node for adding follow-up questions
         
         # Add edges to define the flow
-        graph.add_edge("analyze", "llm")  # First analyze, then call LLM
-        
         graph.add_conditional_edges(
             "llm",  # From the LLM node
             self.exists_action,  # Check if there's a tool to call
-            {True: "action", False: "followup"}  # If yes, go to action; if no, add followups
+            {True: "action", False: "add_followups"}  # If yes, go to action; if no, add followups
         )
-        
         graph.add_edge("action", "llm")  # After action, go back to LLM
-        graph.add_edge("followup", END)  # After adding followups, end
+        graph.add_edge("add_followups", END)  # After adding followups, end
         
         # Set the entry point
-        graph.set_entry_point("analyze")
+        graph.set_entry_point("llm")
         
         # Compile the graph
         self.graph = graph.compile()
 
-    def analyze_query(self, state: AgentState) -> AgentState:
-        """Analyze the user query to determine the type and extract key information."""
-        messages = state.get('messages', [])
-        
-        # Default values
-        query_type = "general"
-        destination = ""
-        
-        # Find the last user message
-        user_message = None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                user_message = msg.content
-                break
-        
-        if user_message:
-            # Simple analysis to categorize query type
-            lower_msg = user_message.lower()
-            
-            # Check for route planning queries
-            if any(word in lower_msg for word in ["juthatok", "eljutni", "útvonal", "hogyan jutok", "hogyan menjek", "útiterv"]):
-                query_type = "route"
-                
-                # Try to extract destination
-                try:
-                    places = parse_trip_input(user_message)
-                    if places and "to" in places:
-                        destination = places["to"]
-                except:
-                    pass
-            
-            # Check for attraction queries
-            elif any(word in lower_msg for word in ["látnivaló", "látnivalók", "látogassak", "múzeum", "érdekes hely"]):
-                query_type = "attraction"
-                
-                # Try to extract attraction names
-                try:
-                    attractions = extract_attraction_names(user_message)
-                    if attractions:
-                        destination = attractions[0]
-                except:
-                    pass
-            
-            # Check for food/restaurant queries
-            elif any(word in lower_msg for word in ["étterem", "kávézó", "enni", "étel", "kávé", "ebéd", "vacsora"]):
-                query_type = "food"
-        
-        # Return updated state with query analysis
-        return {
-            'messages': messages,
-            'query_type': query_type,
-            'destination': destination
-        }
-
-    def exists_action(self, state: AgentState) -> bool:
+    def exists_action(self, state: AgentState):
         """Check if the last message contains any tool calls."""
         result = state['messages'][-1]
         return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
 
-    def call_openai(self, state: AgentState) -> AgentState:
+    def call_openai(self, state: AgentState):
         """Call the language model to generate a response or tool calls."""
         messages = state['messages']
-        query_type = state.get('query_type', 'general')
-        destination = state.get('destination', '')
         
         # Add system message if not present
         if self.system and not any(isinstance(msg, SystemMessage) for msg in messages):
@@ -428,17 +359,11 @@ class Agent:
         message = self.model.invoke(messages)
         
         # Return the updated state with the new message
-        return {
-            'messages': [message],
-            'query_type': query_type,
-            'destination': destination
-        }
+        return {'messages': [message]}
 
-    def take_action(self, state: AgentState) -> AgentState:
+    def take_action(self, state: AgentState):
         """Execute any tool calls from the language model."""
         tool_calls = state['messages'][-1].tool_calls
-        query_type = state.get('query_type', 'general')
-        destination = state.get('destination', '')
         results = []
         
         # Process each tool call
@@ -456,63 +381,56 @@ class Agent:
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
             
         # Return the updated state with the tool results
-        return {
-            'messages': results,
-            'query_type': query_type,
-            'destination': destination
-        }
+        return {'messages': results}
     
-    def add_followups(self, state: AgentState) -> AgentState:
-        """Add follow-up questions to the final response."""
+    def add_followups(self, state: AgentState):
+        """Add tourism follow-up questions to the final response."""
         messages = state['messages']
-        query_type = state.get('query_type', 'general')
-        destination = state.get('destination', '')
         
-        # Get the last message which should be the final response
-        if not messages or not isinstance(messages[-1], SystemMessage):
-            # Try to generate some follow-up suggestions
+        # If there are no messages, just return the state
+        if not messages:
+            return {'messages': messages}
+        
+        # Get the last message (should be the final response)
+        last_message = messages[-1]
+        
+        # Only process if it's an AI message (not a tool message)
+        if isinstance(last_message, AIMessage):
+            # Create conversation context from recent messages
+            context = ""
+            # Get up to 3 most recent messages, excluding the current one
+            for msg in state.get('messages', [])[-4:-1]:
+                if hasattr(msg, 'content'):
+                    if isinstance(msg, HumanMessage):
+                        context += f"User: {msg.content}\n"
+                    elif isinstance(msg, AIMessage):
+                        context += f"Assistant: {msg.content}\n"
+            
+            # Generate follow-up suggestions
             try:
-                # Create context from the last few messages
-                context = ""
-                for msg in messages[-3:]:  # Last 3 messages
-                    if hasattr(msg, 'content'):
-                        context += msg.content + "\n"
+                followup_questions = generate_tourism_followups(context)
                 
-                # Generate follow-up suggestions
-                suggestions = generate_followup_suggestions(context, query_type, destination)
-                
-                # Get the last message
-                last_message = messages[-1]
-                
-                if isinstance(last_message, SystemMessage) or not hasattr(last_message, 'content'):
-                    # Can't modify this message type, just return
-                    return {'messages': messages, 'query_type': query_type, 'destination': destination}
-                
-                # Add suggestions to the response content
+                # Get current content
                 content = last_message.content
                 
-                # Add a section for follow-up questions
-                content += "\n\n---\n**További kérdések:**\n"
-                for i, suggestion in enumerate(suggestions, 1):
-                    content += f"{i}. {suggestion}\n"
-                
-                # Create a new message with the updated content
-                if hasattr(last_message, '__class__'):
-                    # Try to create same message type
-                    new_message = last_message.__class__(content=content)
-                else:
-                    # Fallback to system message
-                    new_message = SystemMessage(content=content)
-                
-                # Replace the last message with our enhanced version
-                messages[-1] = new_message
+                # Add follow-up section if it's not already there
+                if "További kérdések" not in content:
+                    # Add a section for follow-up questions
+                    content += "\n\n---\n**További kérdések:**\n"
+                    for i, question in enumerate(followup_questions, 1):
+                        content += f"{i}. {question}\n"
+                    
+                    # Create a new message with the updated content
+                    new_message = AIMessage(content=content)
+                    
+                    # Replace the last message with our enhanced version
+                    messages[-1] = new_message
                 
             except Exception as e:
-                print(f"Error adding followups: {e}")
-                # If something goes wrong, just return the original messages
+                # If there's an error, just return the original messages
                 pass
         
-        return {'messages': messages, 'query_type': query_type, 'destination': destination}
+        return {'messages': messages}
 
 # === System prompt for the agent ===
 prompt = """
@@ -542,7 +460,7 @@ IMPORTANT RULES:
 - When users ask about attractions in Budapest, always use the web search capability
 - First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
 - Explicitly state that information comes from "web search" in your responses
-- After providing an answer, encourage the user to ask follow-up questions about nearby attractions, food options, or other points of interest
+- After providing an answer, encourage the user to explore more about Budapest
    
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
@@ -558,7 +476,7 @@ tools = [
     attractions_tool,
     extract_attractions_tool,
     attraction_info_tool,
-    followup_suggestions_tool,
+    tourism_followups_tool,
     format_route_summary
 ]
 
