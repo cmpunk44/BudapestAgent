@@ -23,7 +23,7 @@ if "debug_info" not in st.session_state:
 
 # Sidebar with app info
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/Parliament_Building%2C_Budapest%2C_outside.jpg/1280px-Parliament_Building%2C_Budapest%2C_outside.jpg", use_column_width=True)
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/Parliament_Building%2C_Budapest%2C_outside.jpg/1280px-Parliament_Building%2C_Budapest%2C_outside.jpg", use_container_width=True)
     st.title("Budapest Explorer")
     st.markdown("""
     **Funkciók:**
@@ -51,109 +51,31 @@ with st.sidebar:
         
     st.caption("© 2025 Budapest Explorer - Pannon Egyetem")
 
-# Layout based on debug mode
+# Define layout
+# Instead of using conditional columns, we'll use a more reliable approach
+st.title("🇭🇺 Budapest Explorer")
+
+# If debug mode is enabled, create columns
 if debug_mode:
-    # Create two columns - main chat and debug panel
-    col1, col2 = st.columns([2, 1])
-    chat_col = col1
-    debug_col = col2
-else:
-    # Only use the main area for the chat
-    chat_col = st
-
-# Main content in the chat column
-with chat_col:
-    st.title("🇭🇺 Budapest Explorer")
-
-    # Display chat messages
-    for message in st.session_state.messages:
-        if isinstance(message, HumanMessage):
-            with st.chat_message("user"):
-                st.write(message.content)
-        elif isinstance(message, AIMessage):
-            with st.chat_message("assistant"):
-                st.write(message.content)
-
-    # User input
-    user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
-
-    if user_prompt:
-        # Add user message to chat history
-        user_message = HumanMessage(content=user_prompt)
-        st.session_state.messages.append(user_message)
+    # Create two columns with explicit proportion
+    cols = st.columns([2, 1])
+    
+    # Main chat area in first column
+    with cols[0]:
+        # Display chat messages
+        for message in st.session_state.messages:
+            if isinstance(message, HumanMessage):
+                with st.chat_message("user"):
+                    st.write(message.content)
+            elif isinstance(message, AIMessage):
+                with st.chat_message("assistant"):
+                    st.write(message.content)
         
-        # Display user message
-        with st.chat_message("user"):
-            st.write(user_prompt)
-        
-        # Get response from agent
-        with st.chat_message("assistant"):
-            with st.spinner("Gondolkodom..."):
-                # Add context about transport mode if selected
-                if transport_mode != "Tömegközlekedés":
-                    mode_map = {
-                        "Gyalogos": "walking",
-                        "Kerékpár": "bicycling",
-                        "Autó": "driving",
-                        "Tömegközlekedés": "transit"
-                    }
-                    context_prompt = f"{user_prompt} (használj {mode_map[transport_mode]} közlekedési módot)"
-                    agent_input = HumanMessage(content=context_prompt)
-                else:
-                    agent_input = user_message
-                    
-                # Get all previous messages for context
-                all_messages = st.session_state.messages[:-1]  # Exclude the most recent user message
-                all_messages.append(agent_input)
-                
-                try:
-                    # Clear debug info for this new interaction
-                    current_debug_info = []
-                    
-                    # Execute the agent and collect all intermediate steps
-                    result = budapest_agent.graph.invoke(
-                        {"messages": all_messages},
-                        {"recursion_limit": 10}  # Limit recursion to prevent infinite loops
-                    )
-                    
-                    # Extract the final response
-                    final_response = result["messages"][-1]
-                    
-                    # Collect all tool calls from the interaction for debugging
-                    for message in result["messages"]:
-                        if hasattr(message, 'tool_calls') and message.tool_calls:
-                            for tool_call in message.tool_calls:
-                                current_debug_info.append({
-                                    "tool": tool_call["name"],
-                                    "args": tool_call["args"],
-                                    "step": "tool_call"
-                                })
-                        elif isinstance(message, ToolMessage):
-                            current_debug_info.append({
-                                "tool": message.name,
-                                "result": message.content,
-                                "step": "tool_result"
-                            })
-                    
-                    # Add the debug info to the session state
-                    st.session_state.debug_info.append({
-                        "user_query": user_prompt,
-                        "steps": current_debug_info
-                    })
-                    
-                    # Display the response
-                    st.write(final_response.content)
-                    
-                    # Add to chat history
-                    st.session_state.messages.append(AIMessage(content=final_response.content))
-                    
-                except Exception as e:
-                    st.error(f"Hiba történt: {str(e)}")
-                    st.session_state.messages.append(AIMessage(content=f"Sajnos hiba történt: {str(e)}"))
-
-# Debug panel in the second column
-if debug_mode and 'debug_col' in locals():
-    with debug_col:
+        # User input in the first column
+        user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
+    
+    # Debug panel in second column
+    with cols[1]:
         st.title("🔍 Developer Mode")
         st.markdown("### ReAct Agent Process")
         
@@ -174,6 +96,106 @@ if debug_mode and 'debug_col' in locals():
                                 # Otherwise show as text
                                 st.text(step['result'][:500] + ('...' if len(step['result']) > 500 else ''))
                         st.markdown("---")
+else:
+    # No columns, just use main area for chat
+    # Display chat messages
+    for message in st.session_state.messages:
+        if isinstance(message, HumanMessage):
+            with st.chat_message("user"):
+                st.write(message.content)
+        elif isinstance(message, AIMessage):
+            with st.chat_message("assistant"):
+                st.write(message.content)
+    
+    # User input in main area
+    user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
+
+# Process user input (outside of the column context to avoid issues)
+if user_prompt:
+    # Add user message to chat history
+    user_message = HumanMessage(content=user_prompt)
+    st.session_state.messages.append(user_message)
+    
+    # Add context about transport mode if selected
+    if transport_mode != "Tömegközlekedés":
+        mode_map = {
+            "Gyalogos": "walking",
+            "Kerékpár": "bicycling",
+            "Autó": "driving",
+            "Tömegközlekedés": "transit"
+        }
+        context_prompt = f"{user_prompt} (használj {mode_map[transport_mode]} közlekedési módot)"
+        agent_input = HumanMessage(content=context_prompt)
+    else:
+        agent_input = user_message
+        
+    # Get all previous messages for context
+    all_messages = st.session_state.messages[:-1]  # Exclude the most recent user message
+    all_messages.append(agent_input)
+    
+    # We need to rerun the app to show the updated messages
+    st.rerun()
+
+# If we have messages and the last one is from the user, generate a response
+if st.session_state.messages and isinstance(st.session_state.messages[-1], HumanMessage):
+    # Display user message (should already be visible from the rerun)
+    
+    # Get response from agent
+    with st.chat_message("assistant"):
+        with st.spinner("Gondolkodom..."):
+            # Use the last user message
+            agent_input = st.session_state.messages[-1]
+            
+            # Get all previous messages for context (excluding the last user message)
+            all_messages = st.session_state.messages
+            
+            try:
+                # Clear debug info for this new interaction
+                current_debug_info = []
+                
+                # Execute the agent and collect all intermediate steps
+                result = budapest_agent.graph.invoke(
+                    {"messages": all_messages},
+                    {"recursion_limit": 10}  # Limit recursion to prevent infinite loops
+                )
+                
+                # Extract the final response
+                final_response = result["messages"][-1]
+                
+                # Collect all tool calls from the interaction for debugging
+                for message in result["messages"]:
+                    if hasattr(message, 'tool_calls') and message.tool_calls:
+                        for tool_call in message.tool_calls:
+                            current_debug_info.append({
+                                "tool": tool_call["name"],
+                                "args": tool_call["args"],
+                                "step": "tool_call"
+                            })
+                    elif isinstance(message, ToolMessage):
+                        current_debug_info.append({
+                            "tool": message.name,
+                            "result": message.content,
+                            "step": "tool_result"
+                        })
+                
+                # Add the debug info to the session state
+                st.session_state.debug_info.append({
+                    "user_query": agent_input.content,
+                    "steps": current_debug_info
+                })
+                
+                # Display the response
+                st.write(final_response.content)
+                
+                # Add to chat history
+                st.session_state.messages.append(AIMessage(content=final_response.content))
+                
+            except Exception as e:
+                st.error(f"Hiba történt: {str(e)}")
+                st.session_state.messages.append(AIMessage(content=f"Sajnos hiba történt: {str(e)}"))
+                
+            # We need to rerun to reset the "waiting for response" state
+            st.rerun()
 
 # Add footer
 st.markdown("---")
