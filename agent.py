@@ -212,52 +212,6 @@ Return a list where each name is followed by its description.
             "attractions": attractions
         }
 
-@tool
-def format_route_summary(route_data: Dict[str, Any]) -> str:
-    """Formats route data into a user-friendly summary."""
-    if not isinstance(route_data, dict):
-        try:
-            route_data = json.loads(route_data)
-        except:
-            return "Hibás útvonal adat formátum."
-    
-    if "error" in route_data:
-        return f"Hiba történt: {route_data['error']}"
-        
-    if "routes" not in route_data or not route_data["routes"]:
-        return "Sajnos nem találtam útvonalat."
-        
-    route = route_data["routes"][0]
-    legs = route["legs"][0]
-    
-    duration = legs["duration"]["text"]
-    distance = legs["distance"]["text"]
-    
-    steps = []
-    for step in legs["steps"]:
-        if step.get("travel_mode") == "TRANSIT":
-            transit = step.get("transit_details", {})
-            line = transit.get("line", {}).get("short_name", "")
-            vehicle = transit.get("line", {}).get("vehicle", {}).get("name", "jármű")
-            departure = transit.get("departure_stop", {}).get("name", "")
-            arrival = transit.get("arrival_stop", {}).get("name", "")
-            steps.append(f"🚆 {line} {vehicle}: {departure} → {arrival}")
-        elif step.get("travel_mode") == "WALKING":
-            steps.append(f"🚶 Gyalogolj {step.get('duration', {}).get('text', '')}")
-    
-    summary = f"""
-    🛣️ **Útvonal: {legs['start_address']} → {legs['end_address']}**
-    ⏱️ Időtartam: {duration}
-    📏 Távolság: {distance}
-    
-    **Lépések:**
-    """
-    
-    for i, step in enumerate(steps, 1):
-        summary += f"{i}. {step}\n"
-    
-    return summary
-
 # === Define the agent state ===
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
@@ -343,7 +297,14 @@ Follow these steps when responding to users:
 1. For route planning:
    - Extract origin and destination from user input using parse_input_tool
    - Call directions_tool with both locations to get a route
-   - Format the route results in a user-friendly way with format_route_summary
+   - Format the route results into a user-friendly summary following these guidelines:
+     * Start with a header showing origin → destination
+     * Include the total duration and distance
+     * List each step of the journey with appropriate icons:
+       - 🚆 for transit vehicles (showing line numbers, vehicle types, and stop names)
+       - 🚶 for walking segments (showing duration)
+     * Format step numbers and use clear arrows (→) between locations
+     * For transit steps, include: line number, vehicle type, departure stop, and arrival stop
    - If the user specifies a transportation mode (walking, bicycling, driving), use that mode
 
 2. For attraction recommendations:
@@ -361,6 +322,13 @@ IMPORTANT RULES:
 - When users ask about attractions in Budapest, always use the web search capability
 - First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
 - Explicitly state that information comes from "web search" in your responses
+- When formatting route information from directions_tool, pay special attention to:
+  * Use a consistent, readable format with proper spacing and organization
+  * For transit routes, clearly indicate line numbers and vehicle types (bus, tram, metro)
+  * Include emojis to represent different transportation modes (🚆, 🚍, 🚇, 🚶)
+  * Format durations and distances in a readable way
+  * Structure step-by-step directions with clear numbering
+  * Handle error cases gracefully (route not found, invalid locations)
    
 Always respond in Hungarian unless the user specifically asks in another language.
 Be helpful, friendly, and provide concise but complete information.
@@ -369,16 +337,14 @@ Be helpful, friendly, and provide concise but complete information.
 # Create the model instance
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
 
-# Define the tools available to the agent
+# Define the tools available to the agent (removed format_route_summary)
 tools = [
     parse_input_tool, 
     directions_tool, 
     attractions_tool,
     extract_attractions_tool,
-    attraction_info_tool,
-    format_route_summary
+    attraction_info_tool
 ]
 
 # Create the agent instance
 budapest_agent = Agent(model, tools, system=prompt)
-    
