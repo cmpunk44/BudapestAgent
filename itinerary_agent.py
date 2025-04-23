@@ -13,18 +13,18 @@ from typing import List, Dict, Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-# Import tools from the main agent
+# Import the raw functions from agent.py instead of the tool wrappers
 from agent import (
-    parse_input_tool,
-    directions_tool,
-    attractions_tool,
-    extract_attractions_tool,
-    attraction_info_tool,
-    OPENAI_API_KEY
+    OPENAI_API_KEY,
+    parse_trip_input,
+    get_directions,
+    get_local_attractions,
+    extract_attraction_names
 )
 
-# Initialize the LLM
-llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
+# Initialize the LLMs - regular for planning and search-enabled for attraction info
+planning_llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
+search_llm = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY, temperature=0.2)
 
 # System prompt for itinerary planning
 ITINERARY_PROMPT = """
@@ -36,15 +36,6 @@ Készíts részletes útitervet, amely tartalmazza:
 - Útvonalakat a helyszínek között
 - Étkezési javaslatokat
 - Rövid leírást minden helyszínről
-
-You are a Budapest itinerary planner assistant. Your task is to create a personalized itinerary based on the provided information.
-
-Create a detailed itinerary that includes:
-- List of attractions based on user interests
-- Time schedule for each location
-- Routes between locations
-- Meal suggestions
-- Brief description of each location
 """
 
 def create_itinerary(preferences):
@@ -61,16 +52,16 @@ def create_itinerary(preferences):
     
     # Extract attraction names from special requests if any
     if special_requests:
-        # The tool requires 'text' as the parameter name
-        extracted_attractions = extract_attractions_tool(text=special_requests)
+        # Use the raw function directly
+        extracted_attractions = extract_attraction_names(special_requests)
         attractions.extend(extracted_attractions)
     
     # If interests include specific categories, find more attractions
     if not attractions or len(attractions) < 3:
-        # Use directions_tool to get coordinates from starting location
-        route_data = directions_tool(
+        # Use get_directions function directly
+        route_data = get_directions(
             from_place=start_location,
-            to_place="Hősök tere, Budapest",  # Common tourist destination
+            to_place="Hősök tere, Budapest",
             mode=transport_mode
         )
         
@@ -83,11 +74,12 @@ def create_itinerary(preferences):
             # Get attractions for each interest category
             for interest in interests:
                 category = map_interest_to_category(interest)
-                attractions_result = attractions_tool(
+                # Use get_local_attractions function directly
+                attractions_result = get_local_attractions(
                     lat=lat,
                     lng=lng,
                     category=category,
-                    radius=3000
+                    radius=1000
                 )
                 
                 if "places" in attractions_result:
@@ -102,15 +94,16 @@ def create_itinerary(preferences):
     if not selected_attractions:
         selected_attractions = ["Parliament", "Buda Castle", "Fisherman's Bastion"]
     
-    # Step 2: Get attraction information
-    attraction_info = attraction_info_tool(attractions=selected_attractions)
+    # Step 2: Get attraction information using the search-enabled model
+    attraction_descriptions = get_attraction_descriptions_with_search(selected_attractions)
     
     # Step 3: Plan routes between attractions
     routes = []
     current_location = start_location
     
     for attraction in selected_attractions:
-        route = directions_tool(
+        # Use get_directions function directly  
+        route = get_directions(
             from_place=current_location,
             to_place=attraction + ", Budapest",
             mode=transport_mode
@@ -131,14 +124,14 @@ def create_itinerary(preferences):
     Selected attractions:
     {json.dumps(selected_attractions)}
     
-    Attraction information:
-    {attraction_info.get('info', 'Information not available')}
+    Attraction information (from web search):
+    {attraction_descriptions}
     
     Format the itinerary with:
     1. A title and brief introduction
     2. A time schedule starting at 10:00 AM
     3. Details for each attraction including:
-       - Description
+       - Description (use the accurate information from web search)
        - Time needed to visit
        - Transportation instructions
     4. Meal suggestions at appropriate times
@@ -151,7 +144,28 @@ def create_itinerary(preferences):
         HumanMessage(content=prompt)
     ]
     
-    response = llm.invoke(messages)
+    response = planning_llm.invoke(messages)
+    return response.content
+
+def get_attraction_descriptions_with_search(attractions):
+    """Get accurate descriptions for attractions using web search capability"""
+    prompt = f"""
+    You have access to web search to provide accurate information about Budapest attractions.
+    
+    For each of these Budapest attractions, provide a brief but detailed description based on current web information:
+    {json.dumps(attractions)}
+    
+    For each attraction, include:
+    1. What it is (museum, landmark, etc.)
+    2. Historical significance
+    3. Key features and what visitors can see
+    4. Location in Budapest
+    5. Any practical visitor information (if available)
+    
+    Format each description with the attraction name as a header followed by 3-4 informative sentences.
+    """
+    
+    response = search_llm.invoke([HumanMessage(content=prompt)])
     return response.content
 
 def map_interest_to_category(interest):
