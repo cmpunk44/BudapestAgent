@@ -8,7 +8,7 @@ import json
 import re
 import requests
 import operator
-from typing import TypedDict, Annotated, List, Dict, Any
+from typing import TypedDict, Annotated, List, Dict, Any, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
 from langchain_openai import ChatOpenAI
@@ -149,10 +149,66 @@ def extract_attraction_names(text: str) -> list:
     
     return []
 
-# === 7. Tool dekorátorok ===
+# === 7. Reasoning function to analyze user input ===
+def analyze_user_intent(text: str) -> Dict[str, Any]:
+    """Analyzes user query to determine intent and appropriate tool selection."""
+    
+    prompt = f"""
+    You are a Budapest tourism assistant that analyzes user queries to determine the most appropriate tools to use.
+    
+    For the following query, analyze what the user wants and suggest the best tools to use.
+    Consider these possible intents:
+    1. Route planning (user wants to get from place A to place B)
+    2. Finding attractions near a location
+    3. Information about specific attractions
+    4. Finding restaurants/cafes/other venues
+    
+    For your response, return a JSON object with:
+    - "intent": The primary intent of the query
+    - "reasoning": Your step-by-step reasoning about why this is the intent
+    - "tools": Array of recommended tools to use in order
+    - "entities": Any relevant entities extracted (places, attractions, etc.)
+    
+    Query: "{text}"
+    """
+    
+    messages = [HumanMessage(content=prompt)]
+    response = llm.invoke(messages)
+    
+    try:
+        # Try to parse JSON from response
+        analysis = json.loads(response.content.strip())
+        # Ensure required keys exist
+        required_keys = ["intent", "reasoning", "tools"]
+        if all(key in analysis for key in required_keys):
+            return analysis
+    except Exception as e:
+        print(f"Error parsing analysis: {e}")
+        pass
+    
+    # If parsing fails, return a basic analysis
+    return {
+        "intent": "unknown",
+        "reasoning": "Could not determine intent with confidence.",
+        "tools": [],
+        "entities": []
+    }
+
+# === 8. Tool dekorátorok ===
+@tool
+def analyze_intent_tool(text: str) -> dict:
+    """Analyzes the user's query to determine intent and reasoning.
+    Args:
+        text: The user's query text
+    """
+    return analyze_user_intent(text)
+
 @tool
 def parse_input_tool(text: str) -> dict:
-    """Parses user input and extracts 'from' and 'to' destinations."""
+    """Parses user input and extracts 'from' and 'to' destinations.
+    Args:
+        text: The user's query text
+    """
     return parse_trip_input(text)
 
 @tool
@@ -272,11 +328,12 @@ def format_route_summary(route_data: Dict[str, Any]) -> str:
     
     return summary
 
-# === 8. AgentState ===
+# === 9. AgentState ===
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
+    reasoning: Optional[Dict[str, Any]]
 
-# === 9. Agent osztály ===
+# === 10. Agent osztály ===
 class Agent:
     def __init__(self, model, tools, system=""):
         self.system = system
@@ -284,12 +341,38 @@ class Agent:
         self.tools = {t.name: t for t in tools}
 
         graph = StateGraph(AgentState)
+        graph.add_node("analyze", self.analyze_request)
         graph.add_node("llm", self.call_openai)
         graph.add_node("action", self.take_action)
+        
+        # Set flow: analyze -> llm -> action -> llm (loop) -> end
+        graph.add_edge("analyze", "llm")
         graph.add_conditional_edges("llm", self.exists_action, {True: "action", False: END})
         graph.add_edge("action", "llm")
-        graph.set_entry_point("llm")
+        graph.set_entry_point("analyze")
         self.graph = graph.compile()
+
+    def analyze_request(self, state: AgentState) -> AgentState:
+        """Analyze the user request to determine intent and reasoning."""
+        messages = state.get('messages', [])
+        if not messages:
+            return {'messages': messages, 'reasoning': None}
+        
+        # Get the last user message
+        last_user_msg = None
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                last_user_msg = msg
+                break
+        
+        if not last_user_msg:
+            return {'messages': messages, 'reasoning': None}
+            
+        # Analyze the user's intent
+        analysis = analyze_user_intent(last_user_msg.content)
+        
+        # Include reasoning in state
+        return {'messages': messages, 'reasoning': analysis}
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
@@ -297,15 +380,28 @@ class Agent:
 
     def call_openai(self, state: AgentState):
         messages = state['messages']
-        if self.system:
-            if not any(isinstance(msg, SystemMessage) for msg in messages):
-                messages = [SystemMessage(content=self.system)] + messages
+        reasoning = state.get('reasoning')
+        
+        # Add system message if not present
+        if self.system and not any(isinstance(msg, SystemMessage) for msg in messages):
+            system_content = self.system
+            
+            # If we have reasoning, include it in system message
+            if reasoning:
+                reasoning_str = json.dumps(reasoning, indent=2)
+                system_content += f"\n\nAnalysis of the user's last query:\n{reasoning_str}\n\n"
+                system_content += "Use this analysis to guide your tool selection and response strategy."
+                
+            messages = [SystemMessage(content=system_content)] + messages
+        
         message = self.model.invoke(messages)
-        return {'messages': [message]}
+        return {'messages': [message], 'reasoning': reasoning}
 
     def take_action(self, state: AgentState):
         tool_calls = state['messages'][-1].tool_calls
+        reasoning = state.get('reasoning')
         results = []
+        
         for t in tool_calls:
             if t['name'] not in self.tools:
                 result = f"Invalid tool name: {t['name']}. Retry."
@@ -315,9 +411,10 @@ class Agent:
                 except Exception as e:
                     result = f"Error executing tool: {str(e)}"
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
-        return {'messages': results}
+        
+        return {'messages': results, 'reasoning': reasoning}
 
-# === 10. Agent példány kibővített prompttal ===
+# === 11. Agent példány kibővített prompttal ===
 prompt = """
 You are a helpful Hungarian assistant for Budapest public transport and sightseeing.
 You help tourists and locals navigate Budapest and discover interesting places.
@@ -354,11 +451,12 @@ Be helpful, friendly, and provide concise but complete information.
 
 model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
 tools = [
+    analyze_intent_tool,   # Add the intent analysis tool
     parse_input_tool, 
     directions_tool, 
     attractions_tool,
-    extract_attractions_tool,  # Add the extraction tool
-    attraction_info_tool,      # Add the search tool
+    extract_attractions_tool,
+    attraction_info_tool,
     format_route_summary
 ]
 budapest_agent = Agent(model, tools, system=prompt)
