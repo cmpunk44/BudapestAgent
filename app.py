@@ -97,14 +97,6 @@ if debug_mode:
         if st.session_state.debug_info:
             for i, interaction in enumerate(st.session_state.debug_info):
                 with st.expander(f"Query {i+1}: {interaction['user_query'][:30]}...", expanded=(i == len(st.session_state.debug_info)-1)):
-                    # Display query type if available
-                    if 'query_type' in interaction:
-                        st.markdown(f"**Query Type:** {interaction['query_type']}")
-                    
-                    # Display destination if available
-                    if 'destination' in interaction and interaction['destination']:
-                        st.markdown(f"**Destination:** {interaction['destination']}")
-                    
                     # Display tool calls
                     for step in interaction['steps']:
                         if step['step'] == 'tool_call':
@@ -169,103 +161,45 @@ if st.session_state.messages and isinstance(st.session_state.messages[-1], Human
             
             try:
                 # Track tool usage for debugging
-                current_debug_info = {
-                    "user_query": agent_input.content,
-                    "steps": []
-                }
-                tool_summary = []
+                current_debug_info = []
                 
-                # Run the agent with the updated graph
+                # Run the agent
                 result = budapest_agent.graph.invoke(
-                    {
-                        "messages": all_messages,
-                        "query_type": "general",
-                        "destination": ""
-                    },
-                    {"recursion_limit": 12}  # Increased limit to handle followup generation
+                    {"messages": all_messages},
+                    {"recursion_limit": 10}
                 )
                 
-                # Extract query analysis information if available
-                if "query_type" in result:
-                    current_debug_info["query_type"] = result["query_type"]
-                
-                if "destination" in result and result["destination"]:
-                    current_debug_info["destination"] = result["destination"]
-                
                 # Get the final response
-                final_response = None
-                for message in reversed(result["messages"]):
-                    if isinstance(message, AIMessage):
-                        final_response = message
-                        break
+                final_response = result["messages"][-1]
                 
-                # Collect tool calls for debugging and display
+                # Track tool calls for debugging
                 for message in result["messages"]:
                     if hasattr(message, 'tool_calls') and message.tool_calls:
                         for tool_call in message.tool_calls:
-                            # Add to debug info
-                            current_debug_info["steps"].append({
+                            current_debug_info.append({
                                 "tool": tool_call["name"],
                                 "args": tool_call["args"],
                                 "step": "tool_call"
                             })
-                            
-                            # Add to summary for chat display
-                            tool_name = tool_call["name"]
-                            args = tool_call["args"]
-                            
-                            # Don't show the followup_suggestions_tool in the summary
-                            if tool_name == "followup_suggestions_tool":
-                                continue
-                                
-                            # Format differently based on tool
-                            if tool_name == "attraction_info_tool":
-                                if isinstance(args, dict) and 'attractions' in args:
-                                    attractions = args['attractions']
-                                    tool_summary.append(f"🔍 **Web keresés**: {attractions}")
-                                else:
-                                    tool_summary.append(f"🔍 **Web keresés**: {args}")
-                            else:
-                                arg_str = str(args)
-                                if len(arg_str) > 50:
-                                    arg_str = arg_str[:50] + "..."
-                                tool_summary.append(f"🛠️ **{tool_name}**({arg_str})")
-                            
                     elif isinstance(message, ToolMessage):
-                        current_debug_info["steps"].append({
+                        current_debug_info.append({
                             "tool": message.name,
                             "result": message.content,
                             "step": "tool_result"
                         })
                 
                 # Add debug info to session state
-                st.session_state.debug_info.append(current_debug_info)
+                st.session_state.debug_info.append({
+                    "user_query": agent_input.content,
+                    "steps": current_debug_info
+                })
                 
-                # Display the response with tool summary if enabled
-                if final_response:
-                    response_content = final_response.content
-                    
-                    # If tool summary exists and tools should be shown, add it
-                    if show_tools and tool_summary:
-                        # Only add tool section if not already present (could be added by followup tool)
-                        if "Használt eszközök" not in response_content:
-                            tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
-                            response_with_tools = response_content + tool_section
-                            st.write(response_with_tools)
-                            
-                            # Add to chat history
-                            st.session_state.messages.append(AIMessage(content=response_with_tools))
-                        else:
-                            # Tools already included in response
-                            st.write(response_content)
-                            st.session_state.messages.append(AIMessage(content=response_content))
-                    else:
-                        # Just show the regular response
-                        st.write(response_content)
-                        st.session_state.messages.append(AIMessage(content=response_content))
-                else:
-                    # No response found
-                    st.error("Nem sikerült választ generálni.")
+                # Display the response
+                st.write(final_response.content)
+                
+                # Add to chat history
+                st.session_state.messages.append(AIMessage(content=final_response.content))
+                
             except Exception as e:
                 # Simple error handling
                 st.error(f"Hiba történt: {str(e)}")
