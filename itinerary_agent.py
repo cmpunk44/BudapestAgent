@@ -1,7 +1,7 @@
 # itinerary_agent.py
-# Simple itinerary planner for Budapest Explorer
-# Author: Szalay Miklós Márton
-# Thesis project for Pannon University
+# Egyszerű útiterv tervező a Budapest Explorer alkalmazáshoz
+# Szerző: Szalay Miklós Márton
+# Szakdolgozat projekt a Pannon Egyetem számára
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -13,7 +13,7 @@ from typing import List, Dict, Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-# Import the raw functions from agent.py instead of the tool wrappers
+# Importáljuk a nyers függvényeket az agent.py-ból az eszköz wrapperek helyett
 from agent import (
     OPENAI_API_KEY,
     parse_trip_input,
@@ -22,11 +22,11 @@ from agent import (
     extract_attraction_names
 )
 
-# Initialize the LLMs - regular for planning and search-enabled for attraction info
+# LLM-ek inicializálása - normál a tervezéshez és keresés-támogatott a látványosság információkhoz
 planning_llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
 search_llm = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY)
 
-# System prompt for itinerary planning
+# Rendszerprompt az útiterv tervezéshez
 ITINERARY_PROMPT = """
 Te egy Budapest útiterv-készítő asszisztens vagy. Feladatod személyre szabott útvonaltervet készíteni a megadott információk alapján.
 
@@ -39,42 +39,42 @@ Készíts részletes útitervet, amely tartalmazza:
 """
 
 def create_itinerary(preferences):
-    """Create an itinerary based on user preferences"""
-    # Get starting location
+    """Útiterv létrehozása felhasználói preferenciák alapján"""
+    # Kiindulási hely lekérése
     start_location = preferences.get("start_location", "Deák Ferenc tér")
     interests = preferences.get("interests", [])
     available_time = preferences.get("available_time", 4)
     transport_mode = preferences.get("transport_mode", "transit")
     special_requests = preferences.get("special_requests", "")
     
-    # Step 1: Find attractions based on interests
+    # 1. lépés: Látványosságok keresése érdeklődési körök alapján
     attractions = []
     
-    # Extract attraction names from special requests if any
+    # Látványosságnevek kinyerése a speciális kérésekből, ha vannak
     if special_requests:
-        # Use the raw function directly
+        # Közvetlenül használjuk a nyers függvényt
         extracted_attractions = extract_attraction_names(special_requests)
         attractions.extend(extracted_attractions)
     
-    # If interests include specific categories, find more attractions
+    # Ha az érdeklődési körök tartalmaznak konkrét kategóriákat, keressünk több látványosságot
     if not attractions or len(attractions) < 3:
-        # Use get_directions function directly
+        # Közvetlenül használjuk a get_directions függvényt
         route_data = get_directions(
             from_place=start_location,
             to_place="Hősök tere, Budapest",
             mode=transport_mode
         )
         
-        # Extract coordinates from the route
+        # Koordináták kinyerése az útvonalból
         if "routes" in route_data and route_data["routes"]:
             leg = route_data["routes"][0]["legs"][0]
             lat = leg["start_location"]["lat"]
             lng = leg["start_location"]["lng"]
             
-            # Get attractions for each interest category
+            # Látványosságok lekérése minden érdeklődési kategóriához
             for interest in interests:
                 category = map_interest_to_category(interest)
-                # Use get_local_attractions function directly
+                # Közvetlenül használjuk a get_local_attractions függvényt
                 attractions_result = get_local_attractions(
                     lat=lat,
                     lng=lng,
@@ -86,23 +86,23 @@ def create_itinerary(preferences):
                     for place in attractions_result["places"]:
                         attractions.append(place["name"])
     
-    # Limit to top attractions based on available time
+    # Korlátozás a legjobb látványosságokra a rendelkezésre álló idő alapján
     max_attractions = min(int(available_time) // 2 + 1, 5)
     selected_attractions = attractions[:max_attractions]
     
-    # If no attractions were found, add some default attractions
+    # Ha nem találtunk látványosságokat, adjunk hozzá néhány alapértelmezett látványosságot
     if not selected_attractions:
-        selected_attractions = ["Parliament", "Buda Castle", "Fisherman's Bastion"]
+        selected_attractions = ["Parlament", "Budai vár", "Halászbástya"]
     
-    # Step 2: Get attraction information using the search-enabled model
+    # 2. lépés: Látványosság információk lekérése a keresés-támogatott modellel
     attraction_descriptions = get_attraction_descriptions_with_search(selected_attractions)
     
-    # Step 3: Plan routes between attractions
+    # 3. lépés: Útvonalak tervezése a látványosságok között
     routes = []
     current_location = start_location
     
     for attraction in selected_attractions:
-        # Use get_directions function directly  
+        # Közvetlenül használjuk a get_directions függvényt
         route = get_directions(
             from_place=current_location,
             to_place=attraction + ", Budapest",
@@ -111,32 +111,32 @@ def create_itinerary(preferences):
         routes.append(route)
         current_location = attraction + ", Budapest"
     
-    # Step 4: Generate the final itinerary with the LLM
+    # 4. lépés: Végső útiterv generálása az LLM-mel
     prompt = f"""
-    Create a Budapest itinerary based on these details:
+    Készíts egy budapesti útitervet a következő részletek alapján:
     
-    Starting location: {start_location}
-    Interests: {', '.join(interests)}
-    Available time: {available_time} hours
-    Transportation mode: {transport_mode}
-    Special requests: {special_requests}
+    Kiindulási hely: {start_location}
+    Érdeklődési körök: {', '.join(interests)}
+    Rendelkezésre álló idő: {available_time} óra
+    Közlekedési mód: {transport_mode}
+    Speciális kérések: {special_requests}
     
-    Selected attractions:
+    Kiválasztott látványosságok:
     {json.dumps(selected_attractions)}
     
-    Attraction information (from web search):
+    Látványosság információk (webes keresésből):
     {attraction_descriptions}
     
-    Format the itinerary with:
-    1. A title and brief introduction
-    2. A time schedule starting at 10:00 AM
-    3. Details for each attraction including:
-       - Description (use the accurate information from web search)
-       - Time needed to visit
-       - Transportation instructions
-    4. Meal suggestions at appropriate times
+    Formázd az útitervet a következőkkel:
+    1. Egy cím és rövid bevezető
+    2. Egy időbeosztás 10:00-tól kezdve
+    3. Részletek minden látványosságról, beleértve:
+       - Leírás (használd a pontos információkat a webes keresésből)
+       - Szükséges idő a látogatáshoz
+       - Közlekedési utasítások
+    4. Étkezési javaslatok megfelelő időpontokban
     
-    Make the itinerary visually organized and easy to follow.
+    Legyen az útiterv vizuálisan rendezett és könnyen követhető.
     """
     
     messages = [
@@ -148,28 +148,28 @@ def create_itinerary(preferences):
     return response.content
 
 def get_attraction_descriptions_with_search(attractions):
-    """Get accurate descriptions for attractions using web search capability"""
+    """Pontos leírások lekérése látványosságokhoz webes keresési képesség használatával"""
     prompt = f"""
-    You have access to web search to provide accurate information about Budapest attractions.
+    Webes kereséshez hozzáféréssel rendelkezel, hogy pontos információkat nyújts budapesti látványosságokról.
     
-    For each of these Budapest attractions, provide a brief but detailed description based on current web information:
+    A következő budapesti látványosságok mindegyikéről adj rövid, de részletes leírást aktuális webes információk alapján:
     {json.dumps(attractions)}
     
-    For each attraction, include:
-    1. What it is (museum, landmark, etc.)
-    2. Historical significance
-    3. Key features and what visitors can see
-    4. Location in Budapest
-    5. Any practical visitor information (if available)
+    Minden látványosságnál szerepeljenek a következők:
+    1. Mi ez (múzeum, nevezetesség stb.)
+    2. Történelmi jelentősége
+    3. Főbb jellemzői és amit a látogatók láthatnak
+    4. Elhelyezkedése Budapesten
+    5. Praktikus látogatói információk (ha elérhetők)
     
-    Format each description with the attraction name as a header followed by 3-4 informative sentences.
+    Formázd minden leírást a látványosság nevével fejlécként, majd 3-4 informatív mondattal.
     """
     
     response = search_llm.invoke([HumanMessage(content=prompt)])
     return response.content
 
 def map_interest_to_category(interest):
-    """Map user interests to Google Places API categories"""
+    """Felhasználói érdeklődési körök leképezése Google Places API kategóriákra"""
     interest_map = {
         "museums": "museum",
         "history": "tourist_attraction",
