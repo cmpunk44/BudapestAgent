@@ -26,16 +26,18 @@ from agent import (
 planning_llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
 search_llm = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY)
 
-# Rendszerprompt az útiterv tervezéshez
+# System prompt for itinerary planning
 ITINERARY_PROMPT = """
-Te egy Budapest útiterv-készítő asszisztens vagy. Feladatod személyre szabott útvonaltervet készíteni a megadott információk alapján.
+You are a Budapest itinerary planning assistant. Your task is to create personalized itineraries based on the provided information.
 
-Készíts részletes útitervet, amely tartalmazza:
-- A látványosságok listáját a felhasználó érdeklődése alapján
-- Időtervet az egyes helyszínekre
-- Útvonalakat a helyszínek között
-- Étkezési javaslatokat
-- Rövid leírást minden helyszínről
+Create a detailed itinerary that includes:
+- A list of attractions based on the user's interests
+- A time schedule for each location
+- Routes between locations
+- Meal suggestions
+- A brief description of each location
+
+Always respond in the same language as the user's request.
 """
 
 def create_itinerary(preferences):
@@ -111,32 +113,34 @@ def create_itinerary(preferences):
         routes.append(route)
         current_location = attraction + ", Budapest"
     
-    # 4. lépés: Végső útiterv generálása az LLM-mel
+    # 4. Step: Generate the final itinerary with the LLM
     prompt = f"""
-    Készíts egy budapesti útitervet a következő részletek alapján:
+    Create a Budapest itinerary based on these details:
     
-    Kiindulási hely: {start_location}
-    Érdeklődési körök: {', '.join(interests)}
-    Rendelkezésre álló idő: {available_time} óra
-    Közlekedési mód: {transport_mode}
-    Speciális kérések: {special_requests}
+    Starting location: {start_location}
+    Interests: {', '.join(interests)}
+    Available time: {available_time} hours
+    Transportation mode: {transport_mode}
+    Special requests: {special_requests}
     
-    Kiválasztott látványosságok:
+    Selected attractions:
     {json.dumps(selected_attractions)}
     
-    Látványosság információk (webes keresésből):
+    Attraction information (from web search):
     {attraction_descriptions}
     
-    Formázd az útitervet a következőkkel:
-    1. Egy cím és rövid bevezető
-    2. Egy időbeosztás 10:00-tól kezdve
-    3. Részletek minden látványosságról, beleértve:
-       - Leírás (használd a pontos információkat a webes keresésből)
-       - Szükséges idő a látogatáshoz
-       - Közlekedési utasítások
-    4. Étkezési javaslatok megfelelő időpontokban
+    Format the itinerary with:
+    1. A title and brief introduction
+    2. A time schedule starting at 10:00 AM
+    3. Details for each attraction including:
+       - Description (use the accurate information from web search)
+       - Time needed to visit
+       - Transportation instructions
+    4. Meal suggestions at appropriate times
     
-    Legyen az útiterv vizuálisan rendezett és könnyen követhető.
+    Make the itinerary visually organized and easy to follow.
+    
+    Respond in the same language as the user's query.
     """
     
     messages = [
@@ -148,21 +152,23 @@ def create_itinerary(preferences):
     return response.content
 
 def get_attraction_descriptions_with_search(attractions):
-    """Pontos leírások lekérése látványosságokhoz webes keresési képesség használatával"""
+    """Get accurate descriptions for attractions using web search capability"""
     prompt = f"""
-    Webes kereséshez hozzáféréssel rendelkezel, hogy pontos információkat nyújts budapesti látványosságokról.
+    You have access to web search to provide accurate information about Budapest attractions.
     
-    A következő budapesti látványosságok mindegyikéről adj rövid, de részletes leírást aktuális webes információk alapján:
+    For each of these Budapest attractions, provide a brief but detailed description based on current web information:
     {json.dumps(attractions)}
     
-    Minden látványosságnál szerepeljenek a következők:
-    1. Mi ez (múzeum, nevezetesség stb.)
-    2. Történelmi jelentősége
-    3. Főbb jellemzői és amit a látogatók láthatnak
-    4. Elhelyezkedése Budapesten
-    5. Praktikus látogatói információk (ha elérhetők)
+    For each attraction, include:
+    1. What it is (museum, landmark, etc.)
+    2. Historical significance
+    3. Key features and what visitors can see
+    4. Location in Budapest
+    5. Any practical visitor information (if available)
     
-    Formázd minden leírást a látványosság nevével fejlécként, majd 3-4 informatív mondattal.
+    Format each description with the attraction name as a header followed by 3-4 informative sentences.
+    
+    Respond in the same language as the user's query.
     """
     
     response = search_llm.invoke([HumanMessage(content=prompt)])
