@@ -29,14 +29,14 @@ llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature
 # === Eszköz függvények ===
 
 def parse_trip_input(user_input: str) -> dict:
-    """Kiindulási és célállomás kinyerése a felhasználói szövegből."""
+    """Extract origin and destination from user text input."""
     prompt = f"""
-    Te egy többnyelvű asszisztens vagy, aki a magyar helyszínek felismerésére specializálódott.
-    Vonj ki két helyszínt ebből a mondatból.
-    Légy rugalmas a magyar címformátumokkal és budapesti nevezetességekkel.
-    Válaszolj KIZÁRÓLAG JSON formátumban, így:
+    You are a multilingual assistant specializing in Hungarian location recognition.
+    Extract two locations from this sentence.
+    Be flexible with Hungarian address formats and landmarks in Budapest.
+    Respond ONLY with a JSON like:
     {{"from": "X", "to": "Y"}}
-    Bemenet: "{user_input}"
+    Input: "{user_input}"
     """
     messages = [HumanMessage(content=prompt)]
     response = llm.invoke(messages)
@@ -44,13 +44,9 @@ def parse_trip_input(user_input: str) -> dict:
     try:
         return json.loads(response.content)
     except:
-        # Egyszerű regex alapú feldolgozás
-        match = re.search(r'from\s+(.*?)\s+to\s+(.*)', user_input, re.IGNORECASE)
-        if match:
-            return {"from": match.group(1), "to": match.group(2)}
-        # Magyar mintázatok próbálása
-        match = re.search(r'(.*?)-(?:ról|ről|ból|ből|tól|től)\s+(?:a |az )?(.*?)(?:-ra|-re|-ba|-be|-hoz|-hez|-höz)?', user_input, re.IGNORECASE)
-        return {"from": match.group(1), "to": match.group(2)} if match else {"from": "", "to": ""}
+        # Default empty response if parsing fails
+        return {"from": "", "to": ""}
+
 
 def get_directions(from_place: str, to_place: str, mode: str = "transit") -> dict:
     """Útvonal keresése a Google Directions API segítségével."""
@@ -89,6 +85,16 @@ def get_local_attractions(lat: float, lng: float, category: str = "tourist_attra
         "museums": "museum",
         "parks": "park",
         "shopping": "shopping_mall",
+        "art_gallery": "art_gallery",
+        "church": "church",
+        "historical_site": "establishment",
+        "theater": "movie_theater",
+        "hotel": "lodging",
+        "nightlife": "night_club",
+        "spa": "spa",
+        "bakery": "bakery",
+        "viewpoint": "point_of_interest",
+        "entertainment": "amusement_park",
     }
     
     place_type = category_map.get(category.lower(), category)
@@ -116,15 +122,15 @@ def get_local_attractions(lat: float, lng: float, category: str = "tourist_attra
     return {"error": "Places API sikertelen", "places": []}
 
 def extract_attraction_names(text: str) -> list:
-    """Látványosságok neveinek kinyerése a felhasználói szövegből."""
+    """Extract attraction names from user query text."""
     prompt = f"""
-    Te egy budapesti turizmusra specializálódott asszisztens vagy.
-    A következő szövegből vonj ki minden említett vagy implikált budapesti látványosságot, nevezetességet vagy érdeklődésre számot tartó helyet.
-    KIZÁRÓLAG egy JSON tömböt adj vissza a látványosságok neveivel, további szöveg nélkül.
+    You are a specialized assistant for Budapest tourism.
+    From the following text, extract any mentioned or implied Budapest attractions, landmarks, or places of interest.
+    Return ONLY a JSON array of attraction names, with no additional text.
     
-    Példa kimenet: ["Parlament", "Budai vár"]
+    Example output: ["Parliament Building", "Buda Castle"]
     
-    Szöveg: "{text}"
+    Text: "{text}"
     """
     messages = [HumanMessage(content=prompt)]
     response = llm.invoke(messages)
@@ -177,19 +183,19 @@ def extract_attractions_tool(text: str) -> list:
 @tool
 def attraction_info_tool(attractions: list) -> dict:
     """
-    Információk szolgáltatása budapesti látványosságokról webes keresés használatával.
+    Provides information about Budapest attractions using web search.
     Args:
-        attractions: Látványosságnevek listája, amelyekről információt szeretnénk
+        attractions: A list of attraction names to get information about
     """
     if not attractions or len(attractions) == 0:
-        return {"info": "Nincs megadva látványosság.", "source": "web keresés"}
+        return {"info": "No attractions specified.", "source": "web search"}
     
     prompt = f"""
-Te egy budapesti turisztikai asszisztens vagy.
-Kérlek, adj rövid (max 3 mondatos) Budapest-specifikus leírást a következő turisztikai látványosságokról:
+You are a tourist assistant specialized in Budapest.
+Please provide a short (max 3 sentences) Budapest-specific description for each of the following tourist attractions:
 {json.dumps(attractions, indent=2)}
-KIZÁRÓLAG budapesti kontextusra koncentrálj. Ne adj meg globális vagy irreleváns tartalmat.
-Adj vissza egy listát, ahol minden név után következik annak leírása.
+Focus ONLY on Budapest context. No global or irrelevant content.
+Return a list where each name is followed by its description.
 """
     try:
         # Keresőképességgel rendelkező modell használata
@@ -283,55 +289,55 @@ class Agent:
         # Frissített állapot visszaadása az eszköz eredményeivel
         return {'messages': results}
 
-# === Rendszerprompt az ágenshez ===
+# === System prompt for the agent ===
 prompt = """
-Te egy segítőkész magyar asszisztens vagy budapesti tömegközlekedéshez és városnézéshez.
-Segítesz turistáknak és helyieknek navigálni Budapesten és érdekes helyeket felfedezni.
+You are a helpful assistant for Budapest public transport and sightseeing.
+You help tourists and locals navigate Budapest and discover interesting places.
 
-Kövesd ezeket a lépéseket a felhasználóknak való válaszadáskor:
+Follow these steps when responding to users:
 
-1. Útvonaltervezéshez:
-   - Vond ki a kiindulási és célállomást a felhasználói bemenetből a parse_input_tool segítségével
-   - Hívd meg a directions_tool-t mindkét helyszínnel az útvonal lekéréséhez
-   - Formázd az útvonal eredményeit felhasználóbarát összefoglalóvá a következő irányelvek szerint:
-     * Kezdd egy fejléccel, amely mutatja a kiindulási hely → célállomás
-     * Tartalmazza a teljes időtartamot és távolságot
-     * Sorold fel az utazás minden lépését megfelelő ikonokkal:
-       - 🚆 tömegközlekedési járművekhez (vonalszámok, járműtípusok és megállónevek mutatása)
-       - 🚶 gyaloglási szakaszokhoz (időtartam mutatása)
-     * Formázd a lépésszámokat és használj egyértelmű nyilakat (→) a helyszínek között
-     * Tömegközlekedési lépéseknél add meg: vonalszám, járműtípus, indulási megálló és érkezési megálló
-   - Ha a felhasználó megad egy közlekedési módot (gyaloglás, kerékpározás, autózás), használd azt
+1. For route planning:
+   - Extract origin and destination from user input using parse_input_tool
+   - Call directions_tool with both locations to get a route
+   - Format the route results into a user-friendly summary following these guidelines:
+     * Start with a header showing origin → destination
+     * Include the total duration and distance
+     * List each step of the journey with appropriate icons:
+       - 🚆 for transit vehicles (showing line numbers, vehicle types, and stop names)
+       - 🚶 for walking segments (showing duration)
+     * Format step numbers and use clear arrows (→) between locations
+     * For transit steps, include: line number, vehicle type, departure stop, and arrival stop
+   - If the user specifies a transportation mode (walking, bicycling, driving), use that mode
 
-2. Látnivalók ajánlásához:
-   - Szerezz koordinátákat az útvonal adatokból
-   - Hívd meg az attractions_tool-t a releváns koordinátákkal
-   - Ha a felhasználó megad egy kategóriát (éttermek, kávézók stb.), használd azt a kategóriát
-   - Miután megkaptad a látnivalókat, használd az attraction_info_tool-t pontos leírások beszerzéséhez
+2. For attraction recommendations:
+   - Get coordinates from the route data
+   - Call attractions_tool with relevant coordinates
+   - If the user specifies a category (restaurants, cafes, etc.), use that category
+   - After getting attractions, use attraction_info_tool to get accurate descriptions
 
-3. Konkrét információkért a látnivalókról:
-   - Először használd az extract_attractions_tool-t a látnivalónevek azonosításához a kérdésben
-   - Ezután használd az attraction_info_tool-t ezekkel a látnivalónevekkel
-   - Amikor látnivalókról információkat mutatsz be, EGYÉRTELMŰEN említsd meg, hogy ezt webes keresésből kaptad
+3. For specific information about attractions:
+   - Use extract_attractions_tool first to identify attraction names in the query
+   - Then use attraction_info_tool with those attraction names
+   - When showing attraction information, CLEARLY mention you got this from web search
 
-FONTOS SZABÁLYOK:
-- Amikor a felhasználók budapesti látnivalókról kérdeznek, mindig használd a webes keresési képességet
-- Először vond ki a látnivaló neveket az extract_attractions_tool-lal, majd keresd meg őket az attraction_info_tool-lal
-- Válaszaidban kifejezetten említsd meg, hogy az információ "webes keresésből" származik
-- Az útvonal információk formázásakor a directions_tool-ból, különös figyelmet fordíts a következőkre:
-  * Használj következetes, olvasható formátumot megfelelő elrendezéssel
-  * Tömegközlekedési útvonalaknál egyértelműen jelöld a vonalszámokat és járműtípusokat (busz, villamos, metró)
-  * Használj emojikat a különböző közlekedési módok ábrázolására (🚆, 🚍, 🚇, 🚶)
-  * Formázd az időtartamokat és távolságokat olvasható módon
-  * Strukturáld a lépésről-lépésre útmutatást egyértelmű számozással
-  * Kezeld elegánsan a hibaeseteket (útvonal nem található, érvénytelen helyszínek)
-- Mindig fejezd be válaszaidat 1-2 releváns követő kérdéssel a megadott információk alapján:
-  * Útvonaltervezésnél: Kérdezz a célállomás közelében lévő látnivalókról vagy éttermekről
-  * Látnivaló információknál: Kérdezd meg, hogy szeretnének-e tudni a közeli helyekről vagy hogyan juthatnak oda
-  * Általános kérdéseknél: Javasolj kapcsolódó témákat vagy tevékenységeket Budapesten
+IMPORTANT RULES:
+- When users ask about attractions in Budapest, always use the web search capability
+- First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
+- Explicitly state that information comes from "web search" in your responses
+- When formatting route information from directions_tool, pay special attention to:
+  * Use a consistent, readable format with proper spacing and organization
+  * For transit routes, clearly indicate line numbers and vehicle types (bus, tram, metro)
+  * Include emojis to represent different transportation modes (🚆, 🚍, 🚇, 🚶)
+  * Format durations and distances in a readable way
+  * Structure step-by-step directions with clear numbering
+  * Handle error cases gracefully (route not found, invalid locations)
+- Always end your responses with 1-2 relevant follow-up questions based on the information provided:
+  * For route planning: Ask about attractions or restaurants near the destination
+  * For attraction information: Ask if they want to know about nearby places or how to get there
+  * For general queries: Suggest related topics or activities in Budapest
 
-Mindig magyarul válaszolj, kivéve ha a felhasználó kifejezetten más nyelven kérdez.
-Légy segítőkész, barátságos, és adj tömör, de teljes információkat.
+Always respond in the same language the user used to ask their question.
+Be helpful, friendly, and provide concise but complete information.
 """
 
 # Modell példány létrehozása
