@@ -1,6 +1,6 @@
 # agent.py
 # LangGraph-based agent for Budapest tourism and transit information
-# Modified with dedicated reasoning node
+# Modified with dedicated reasoning node and fixed response handling
 # Author: Szalay Miklós Márton
 # Thesis project for Pannon University
 
@@ -217,8 +217,10 @@ Return a list where each name is followed by its description.
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
     messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
-    reasoning_output: Optional[str]  # The reasoning behind the current decision - RENAMED FROM "reasoning"
+    reasoning_output: Optional[str]  # The reasoning behind the current decision
     next_step: Optional[str]  # What action to take next
+    tool_history: Annotated[list[Dict], operator.add]  # Track tool calls and results for final response
+    has_used_tools: Optional[bool]  # Track if any tools have been used
 
 # === Agent class to manage the conversation flow ===
 class Agent:
@@ -233,13 +235,14 @@ class Agent:
         # Create reason model without tools binding
         self.reason_model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.1)
 
-        # Create a graph with three nodes: reasoning, LLM, and action
+        # Create a graph with four nodes: reasoning, LLM, action, and finalize
         graph = StateGraph(AgentState)
         
-        # Add nodes - RENAMED "reasoning" to "reason"
+        # Add nodes
         graph.add_node("reason", self.reason_about_request)  # Node for reasoning about the request
         graph.add_node("llm", self.call_openai)  # Node for generating tool calls
         graph.add_node("action", self.take_action)  # Node for executing tools
+        graph.add_node("finalize", self.finalize_response)  # Node for generating final response
         
         # Add conditional edges
         graph.add_conditional_edges(
@@ -256,11 +259,21 @@ class Agent:
             self.exists_action,
             {
                 True: "action",  # If there are tool calls, go to action
-                False: END  # If no tool calls, end
+                False: "finalize"  # If no tool calls, go to finalize
             }
         )
         
-        graph.add_edge("action", "llm")  # After action, go back to LLM for more tool calls or final response
+        graph.add_conditional_edges(
+            "action",
+            self.should_continue,
+            {
+                True: "llm",  # If need more tools, go back to LLM
+                False: "finalize"  # If we're done with tools, go to finalize
+            }
+        )
+        
+        # After finalize, always end
+        graph.add_edge("finalize", END)
         
         # Set the entry point
         graph.set_entry_point("reason")
@@ -327,8 +340,10 @@ Since the user's question can be answered directly without tools, provide a help
         # Return updated state with reasoning and next step
         return {
             'messages': messages if next_step == "respond_directly" else messages,
-            'reasoning_output': reasoning,  # RENAMED from 'reasoning'
-            'next_step': next_step
+            'reasoning_output': reasoning,
+            'next_step': next_step,
+            'tool_history': [],
+            'has_used_tools': False
         }
 
     def determine_next_step(self, state: AgentState):
@@ -340,10 +355,22 @@ Since the user's question can be answered directly without tools, provide a help
         result = state['messages'][-1]
         return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
 
+    def should_continue(self, state: AgentState):
+        """
+        Determine if we should continue with more tool calls or proceed to finalize.
+        If the last 3 tool call sequences have been the same, we stop to avoid loops.
+        """
+        # Set the has_used_tools flag to true since we've executed at least one tool
+        has_used_tools = True
+        
+        # Check if the last message is an AI message with tool calls
+        last_message = state['messages'][-1]
+        return hasattr(last_message, 'tool_calls') and len(getattr(last_message, 'tool_calls', [])) > 0
+
     def call_openai(self, state: AgentState):
         """Call the language model to generate a response or tool calls."""
         messages = state['messages']
-        reasoning = state.get('reasoning_output', '')  # RENAMED from 'reasoning'
+        reasoning = state.get('reasoning_output', '')
         
         # Add system message if not present, including the reasoning
         if self.system:
@@ -370,14 +397,17 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
         # Return the updated state with the new message
         return {
             'messages': [message],
-            'reasoning_output': reasoning,  # RENAMED from 'reasoning'
-            'next_step': state.get('next_step')
+            'reasoning_output': reasoning,
+            'next_step': state.get('next_step'),
+            'tool_history': state.get('tool_history', []),
+            'has_used_tools': state.get('has_used_tools', False)
         }
 
     def take_action(self, state: AgentState):
         """Execute any tool calls from the language model."""
         tool_calls = state['messages'][-1].tool_calls
         results = []
+        tool_history = state.get('tool_history', [])
         
         # Process each tool call
         for t in tool_calls:
@@ -387,6 +417,13 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
                 try:
                     # Call the tool with the arguments
                     result = self.tools[t['name']].invoke(t['args'])
+                    
+                    # Add to tool history
+                    tool_history.append({
+                        'tool': t['name'],
+                        'args': t['args'],
+                        'result': result
+                    })
                 except Exception as e:
                     result = f"Error executing tool: {str(e)}"
                     
@@ -396,8 +433,68 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
         # Return the updated state with the tool results
         return {
             'messages': results,
-            'reasoning_output': state.get('reasoning_output'),  # RENAMED from 'reasoning'
-            'next_step': state.get('next_step')
+            'reasoning_output': state.get('reasoning_output'),
+            'next_step': state.get('next_step'),
+            'tool_history': tool_history,
+            'has_used_tools': True
+        }
+
+    def finalize_response(self, state: AgentState):
+        """Generate a final response based on all the information gathered."""
+        messages = state['messages']
+        reasoning = state.get('reasoning_output', '')
+        tool_history = state.get('tool_history', [])
+        has_used_tools = state.get('has_used_tools', False)
+        
+        # If we haven't used any tools, the last message should already be the final response
+        if not has_used_tools:
+            return state
+        
+        # Prepare the final response prompt
+        final_system = self.system + f"""
+I've analyzed the user's request and gathered information using various tools.
+
+My initial reasoning was:
+{reasoning}
+
+Here is a summary of the tools I used and the information I gathered:
+"""
+        
+        # Add tool history summary
+        for i, tool in enumerate(tool_history):
+            final_system += f"\n{i+1}. Used {tool['tool']} with args {tool['args']}\n"
+            # Truncate long results
+            result_str = str(tool['result'])
+            if len(result_str) > 300:
+                result_str = result_str[:300] + "... [truncated]"
+            final_system += f"   Result: {result_str}\n"
+            
+        final_system += """
+Now, please provide a comprehensive final response to the user based on all this information.
+Make sure to format the information clearly and include all relevant details.
+If appropriate, include any follow-up questions or suggestions.
+"""
+        
+        # Get all user messages
+        user_messages = [msg for msg in state['messages'] if isinstance(msg, HumanMessage)]
+        
+        # Create final message list with system and user messages
+        final_messages = [SystemMessage(content=final_system)] + user_messages
+        
+        # Add tool messages
+        tool_messages = [msg for msg in state['messages'] if isinstance(msg, ToolMessage)]
+        final_messages.extend(tool_messages)
+        
+        # Call the model for final response
+        final_response = self.model.invoke(final_messages)
+        
+        # Return the updated state with the final response
+        return {
+            'messages': messages + [final_response],
+            'reasoning_output': reasoning,
+            'next_step': state.get('next_step'),
+            'tool_history': tool_history,
+            'has_used_tools': has_used_tools
         }
 
 # === System prompt for the agent ===
