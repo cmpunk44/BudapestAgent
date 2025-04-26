@@ -15,7 +15,8 @@ st.set_page_config(
 )
 
 import json
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+import re
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from agent import budapest_agent
 from itinerary_agent import create_itinerary  # Import the itinerary function
 
@@ -25,10 +26,6 @@ if "messages" not in st.session_state:
     
 if "debug_info" not in st.session_state:
     st.session_state.debug_info = []
-
-# Add reasoning to session state
-if "reasoning" not in st.session_state:
-    st.session_state.reasoning = []
 
 # Initialize session state for active tab
 if "active_tab" not in st.session_state:
@@ -94,6 +91,16 @@ with st.sidebar:
         
     st.caption("© 2025 Budapest Explorer - Pannon Egyetem")
 
+# Function to extract reasoning from SystemMessage
+def extract_reasoning(messages):
+    for msg in messages:
+        if isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content:
+            # Extract the reasoning part
+            match = re.search(r"### Reasoning Plan:(.*?)###", msg.content, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+    return None
+
 # Display different content based on active tab
 if st.session_state.active_tab == "chat":
     # CHAT TAB
@@ -110,7 +117,7 @@ if st.session_state.active_tab == "chat":
         
         # Main chat in first column
         with cols[0]:
-            # Display chat history
+            # Display chat history (excluding system messages with reasoning)
             for message in st.session_state.messages:
                 if isinstance(message, HumanMessage):
                     with st.chat_message("user"):
@@ -125,6 +132,7 @@ if st.session_state.active_tab == "chat":
                             st.text(message.content[:300] + "...")
                         else:
                             st.text(message.content)
+                # Skip displaying SystemMessage in chat
             
             # User input
             user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
@@ -133,23 +141,16 @@ if st.session_state.active_tab == "chat":
         with cols[1]:
             st.title("🔍 Developer Mode")
             
-            # Add a section for reasoning
-            if st.session_state.reasoning:
-                with st.expander("💡 Reasoning", expanded=True):
-                    # Display the latest reasoning
-                    if st.session_state.reasoning:
-                        st.markdown("### Current Reasoning Process:")
-                        st.markdown(st.session_state.reasoning[-1])
+            # Extract and display reasoning from the latest interaction
+            if st.session_state.messages:
+                reasoning = extract_reasoning(st.session_state.messages)
+                if reasoning:
+                    with st.expander("💡 Reasoning Process", expanded=True):
+                        st.markdown(reasoning)
             
             if st.session_state.debug_info:
                 for i, interaction in enumerate(st.session_state.debug_info):
                     with st.expander(f"Query {i+1}: {interaction['user_query'][:30]}...", expanded=(i == len(st.session_state.debug_info)-1)):
-                        # Display reasoning if available
-                        if i < len(st.session_state.reasoning):
-                            st.markdown("### Reasoning:")
-                            st.markdown(st.session_state.reasoning[i])
-                            st.markdown("---")
-                        
                         # Display tool calls
                         for step in interaction['steps']:
                             if step['step'] == 'tool_call':
@@ -161,7 +162,7 @@ if st.session_state.active_tab == "chat":
                             st.markdown("---")
     else:
         # Simple chat layout without debug panel
-        # Display chat history
+        # Display chat history (excluding system messages with reasoning)
         for message in st.session_state.messages:
             if isinstance(message, HumanMessage):
                 with st.chat_message("user"):
@@ -176,6 +177,7 @@ if st.session_state.active_tab == "chat":
                         st.text(message.content[:300] + "...")
                     else:
                         st.text(message.content)
+            # Skip displaying SystemMessage in chat
         
         # User input
         user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
@@ -217,19 +219,28 @@ if st.session_state.active_tab == "chat":
                     
                     # Run the agent
                     result = budapest_agent.graph.invoke(
-                        {"messages": all_messages, "reasoning": ""},
+                        {"messages": all_messages},
                         {"recursion_limit": 10}
                     )
                     
-                    # Get the final response
-                    final_response = result["messages"][-1]
+                    # Get all messages
+                    all_result_messages = result["messages"]
                     
-                    # Store the reasoning
-                    if "reasoning" in result and result["reasoning"]:
-                        st.session_state.reasoning.append(result["reasoning"])
+                    # Filter out SystemMessages containing reasoning for display
+                    display_messages = [msg for msg in all_result_messages if not (isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content)]
+                    
+                    # Get the final response (last non-system message)
+                    final_response = None
+                    for msg in reversed(all_result_messages):
+                        if isinstance(msg, AIMessage):
+                            final_response = msg
+                            break
+                    
+                    if not final_response and display_messages:
+                        final_response = display_messages[-1]
                     
                     # Track tool calls for debugging and summary
-                    for message in result["messages"]:
+                    for message in all_result_messages:
                         if hasattr(message, 'tool_calls') and message.tool_calls:
                             for tool_call in message.tool_calls:
                                 # Add to debug info
@@ -266,21 +277,23 @@ if st.session_state.active_tab == "chat":
                     # Add debug info to session state
                     st.session_state.debug_info.append(current_debug_info)
                     
-                    # Display the response with tool summary
-                    response_content = final_response.content
+                    # Save all messages to chat history
+                    st.session_state.messages.extend(all_result_messages)
                     
-                    # If tool summary exists, add it to the response
-                    if tool_summary:
-                        tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
-                        response_with_tools = response_content + tool_section
-                        st.write(response_with_tools)
+                    # Display the response with tool summary
+                    if final_response:
+                        response_content = final_response.content
                         
-                        # Add to chat history
-                        st.session_state.messages.append(AIMessage(content=response_with_tools))
+                        # If tool summary exists, add it to the response
+                        if tool_summary:
+                            tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
+                            response_with_tools = response_content + tool_section
+                            st.write(response_with_tools)
+                        else:
+                            # Just show the regular response
+                            st.write(response_content)
                     else:
-                        # Just show the regular response
-                        st.write(response_content)
-                        st.session_state.messages.append(AIMessage(content=response_content))
+                        st.error("No response generated")
                     
                 except Exception as e:
                     # Simple error handling
