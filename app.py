@@ -1,8 +1,8 @@
 # app.py
 # Simple Streamlit UI for Budapest tourism and transit agent
-# Modified to display agent reasoning from dedicated reasoning node
+# Modified to work with the improved assistant → reason → action flow
 # Author: Szalay Miklós Márton
-# Thesis project for Pannon University
+# Modified by: Claude 3.7 Sonnet
 
 import streamlit as st
 
@@ -118,14 +118,18 @@ if st.session_state.active_tab == "chat":
                 if isinstance(message, HumanMessage):
                     with st.chat_message("user"):
                         st.write(message.content)
+                        
+                        # After each user message, we should find a corresponding reasoning
+                        # if we have one available (we have at most one reasoning per query)
+                        if show_reasoning and i//2 < len(st.session_state.reasoning) and st.session_state.reasoning[i//2]:
+                            with st.chat_message("system"):
+                                st.markdown("**Reasoning:**")
+                                st.markdown(f"<div style='background-color: #f0f7fb; padding: 10px; border-left: 5px solid #3498db; margin-bottom: 10px;'>{st.session_state.reasoning[i//2]}</div>", unsafe_allow_html=True)
+                
                 elif isinstance(message, AIMessage):
                     with st.chat_message("assistant"):
-                        # Check if we have reasoning for this message
-                        if show_reasoning and i < len(st.session_state.reasoning) and st.session_state.reasoning[i]:
-                            st.markdown("**Reasoning:**")
-                            st.markdown(f"<div style='background-color: #f0f7fb; padding: 10px; border-left: 5px solid #3498db; margin-bottom: 10px;'>{st.session_state.reasoning[i]}</div>", unsafe_allow_html=True)
-                            st.markdown("**Response:**")
                         st.write(message.content)
+                
                 elif isinstance(message, ToolMessage) and show_tools:
                     with st.chat_message("system"):
                         st.text(f"Tool: {message.name}")
@@ -150,15 +154,16 @@ if st.session_state.active_tab == "chat":
                             st.markdown(f"<div style='background-color: #f0f7fb; padding: 10px; border-left: 5px solid #3498db; margin-bottom: 10px;'>{interaction['reasoning']}</div>", unsafe_allow_html=True)
                         
                         # Display tool calls
-                        st.markdown("### Tool Calls")
-                        for step in interaction['steps']:
-                            if step['step'] == 'tool_call':
-                                st.markdown(f"**Tool Called: `{step['tool']}`**")
-                                st.code(json.dumps(step['args'], indent=2), language='json')
-                            else:
-                                st.markdown(f"**Tool Result:**")
-                                st.text(step['result'][:500] + ('...' if len(step['result']) > 500 else ''))
-                            st.markdown("---")
+                        if 'steps' in interaction and interaction['steps']:
+                            st.markdown("### Tool Calls")
+                            for step in interaction['steps']:
+                                if step['step'] == 'tool_call':
+                                    st.markdown(f"**Tool Called: `{step['tool']}`**")
+                                    st.code(json.dumps(step['args'], indent=2), language='json')
+                                else:
+                                    st.markdown(f"**Tool Result:**")
+                                    st.text(step['result'][:500] + ('...' if len(step['result']) > 500 else ''))
+                                st.markdown("---")
     else:
         # Simple chat layout without debug panel
         # Display chat history with reasoning when available
@@ -166,14 +171,17 @@ if st.session_state.active_tab == "chat":
             if isinstance(message, HumanMessage):
                 with st.chat_message("user"):
                     st.write(message.content)
+                    
+                    # After each user message, display reasoning if available
+                    if show_reasoning and i//2 < len(st.session_state.reasoning) and st.session_state.reasoning[i//2]:
+                        with st.chat_message("system"):
+                            st.markdown("**Reasoning:**")
+                            st.markdown(f"<div style='background-color: #f0f7fb; padding: 10px; border-left: 5px solid #3498db; margin-bottom: 10px;'>{st.session_state.reasoning[i//2]}</div>", unsafe_allow_html=True)
+            
             elif isinstance(message, AIMessage):
                 with st.chat_message("assistant"):
-                    # Check if we have reasoning for this message
-                    if show_reasoning and i < len(st.session_state.reasoning) and st.session_state.reasoning[i]:
-                        st.markdown("**Reasoning:**")
-                        st.markdown(f"<div style='background-color: #f0f7fb; padding: 10px; border-left: 5px solid #3498db; margin-bottom: 10px;'>{st.session_state.reasoning[i]}</div>", unsafe_allow_html=True)
-                        st.markdown("**Response:**")
                     st.write(message.content)
+            
             elif isinstance(message, ToolMessage) and show_tools:
                 with st.chat_message("system"):
                     st.text(f"Tool: {message.name}")
@@ -220,35 +228,30 @@ if st.session_state.active_tab == "chat":
                     }
                     tool_summary = []
                     
-                    # Run the agent with the initial empty state for tool_history and has_used_tools
+                    # Run the agent with the initial empty state
                     result = budapest_agent.graph.invoke(
                         {
                             "messages": all_messages, 
-                            "reasoning_output": None, 
-                            "next_step": None,
+                            "reasoning": None, 
+                            "needs_more_tools": False,
                             "tool_history": [],
-                            "has_used_tools": False
+                            "user_query": agent_input.content
                         },
                         {"recursion_limit": 15}  # Increased recursion limit
                     )
                     
-                    # Get the final response - should be the last message in the chain
-                    final_messages = result["messages"]
-                    ai_messages = [msg for msg in final_messages if isinstance(msg, AIMessage)]
+                    # Get the reasoning from the result
+                    if "reasoning" in result and result["reasoning"]:
+                        current_reasoning = result["reasoning"]
+                        st.session_state.reasoning.append(current_reasoning)
+                        current_debug_info["reasoning"] = current_reasoning
                     
+                    # Extract the final AI message
+                    ai_messages = [msg for msg in result["messages"] if isinstance(msg, AIMessage)]
                     if ai_messages:
-                        final_response = ai_messages[-1]  # Get the last AI message
+                        final_response = ai_messages[-1]
                     else:
-                        final_response = final_messages[-1]  # Fallback to last message
-                    
-                    # Get the reasoning from the state
-                    current_reasoning = result.get("reasoning_output", "No reasoning provided")
-                    
-                    # Store the reasoning for this response
-                    st.session_state.reasoning.append(current_reasoning)
-                    
-                    # Add reasoning to debug info
-                    current_debug_info["reasoning"] = current_reasoning
+                        final_response = AIMessage(content="I'm sorry, but I encountered an issue processing your request.")
                     
                     # Track tool calls for debugging and summary
                     for message in result["messages"]:
@@ -296,27 +299,14 @@ if st.session_state.active_tab == "chat":
                         tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
                         response_with_tools = response_content + tool_section
                         
-                        # Display reasoning if enabled
-                        if show_reasoning and current_reasoning:
-                            st.markdown("**Reasoning:**")
-                            st.markdown(f"<div style='background-color: #f0f7fb; padding: 10px; border-left: 5px solid #3498db; margin-bottom: 10px;'>{current_reasoning}</div>", unsafe_allow_html=True)
-                            st.markdown("**Response:**")
-                            st.write(response_with_tools)
-                        else:
-                            st.write(response_with_tools)
+                        # Display response (reasoning is now shown after the user message)
+                        st.write(response_with_tools)
                         
                         # Add to chat history
                         st.session_state.messages.append(AIMessage(content=response_with_tools))
                     else:
                         # Just show the regular response
-                        if show_reasoning and current_reasoning:
-                            st.markdown("**Reasoning:**")
-                            st.markdown(f"<div style='background-color: #f0f7fb; padding: 10px; border-left: 5px solid #3498db; margin-bottom: 10px;'>{current_reasoning}</div>", unsafe_allow_html=True)
-                            st.markdown("**Response:**")
-                            st.write(response_content)
-                        else:
-                            st.write(response_content)
-                        
+                        st.write(response_content)
                         st.session_state.messages.append(AIMessage(content=response_content))
                     
                 except Exception as e:
