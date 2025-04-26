@@ -1,5 +1,6 @@
 # agent.py
-# Simple LangGraph-based agent for Budapest tourism and transit information
+# LangGraph-based agent for Budapest tourism and transit information
+# Modified with dedicated reasoning node
 # Author: Szalay Miklós Márton
 # Thesis project for Pannon University
 
@@ -11,10 +12,10 @@ import json
 import re
 import requests
 import operator
-from typing import TypedDict, Annotated, List, Dict, Any
+from typing import TypedDict, Annotated, List, Dict, Any, Sequence, Union, Optional
 
 # Import necessary LangChain components
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import tool
@@ -212,56 +213,12 @@ Return a list where each name is followed by its description.
             "attractions": attractions
         }
 
-@tool
-def format_route_summary(route_data: Dict[str, Any]) -> str:
-    """Formats route data into a user-friendly summary."""
-    if not isinstance(route_data, dict):
-        try:
-            route_data = json.loads(route_data)
-        except:
-            return "Hibás útvonal adat formátum."
-    
-    if "error" in route_data:
-        return f"Hiba történt: {route_data['error']}"
-        
-    if "routes" not in route_data or not route_data["routes"]:
-        return "Sajnos nem találtam útvonalat."
-        
-    route = route_data["routes"][0]
-    legs = route["legs"][0]
-    
-    duration = legs["duration"]["text"]
-    distance = legs["distance"]["text"]
-    
-    steps = []
-    for step in legs["steps"]:
-        if step.get("travel_mode") == "TRANSIT":
-            transit = step.get("transit_details", {})
-            line = transit.get("line", {}).get("short_name", "")
-            vehicle = transit.get("line", {}).get("vehicle", {}).get("name", "jármű")
-            departure = transit.get("departure_stop", {}).get("name", "")
-            arrival = transit.get("arrival_stop", {}).get("name", "")
-            steps.append(f"🚆 {line} {vehicle}: {departure} → {arrival}")
-        elif step.get("travel_mode") == "WALKING":
-            steps.append(f"🚶 Gyalogolj {step.get('duration', {}).get('text', '')}")
-    
-    summary = f"""
-    🛣️ **Útvonal: {legs['start_address']} → {legs['end_address']}**
-    ⏱️ Időtartam: {duration}
-    📏 Távolság: {distance}
-    
-    **Lépések:**
-    """
-    
-    for i, step in enumerate(steps, 1):
-        summary += f"{i}. {step}\n"
-    
-    return summary
-
 # === Define the agent state ===
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
     messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
+    reasoning: Optional[str]  # The reasoning behind the current decision
+    next_step: Optional[str]  # What action to take next
 
 # === Agent class to manage the conversation flow ===
 class Agent:
@@ -272,25 +229,111 @@ class Agent:
         self.system = system
         self.model = model.bind_tools(tools)
         self.tools = {t.name: t for t in tools}
+        
+        # Create reason model without tools binding
+        self.reason_model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.1)
 
-        # Create a simple graph with two nodes: LLM and action
+        # Create a graph with three nodes: reasoning, LLM, and action
         graph = StateGraph(AgentState)
-        graph.add_node("llm", self.call_openai)  # Node for generating responses or tool calls
+        
+        # Add nodes
+        graph.add_node("reasoning", self.reason_about_request)  # Node for reasoning about the request
+        graph.add_node("llm", self.call_openai)  # Node for generating tool calls
         graph.add_node("action", self.take_action)  # Node for executing tools
         
-        # Add edges to define the flow
+        # Add conditional edges
         graph.add_conditional_edges(
-            "llm",  # From the LLM node
-            self.exists_action,  # Check if there's a tool to call
-            {True: "action", False: END}  # If yes, go to action; if no, end
+            "reasoning",
+            self.determine_next_step,
+            {
+                "use_tools": "llm",  # If tools are needed, go to LLM
+                "respond_directly": END  # If no tools needed, go to end
+            }
         )
-        graph.add_edge("action", "llm")  # After action, go back to LLM
+        
+        graph.add_conditional_edges(
+            "llm",
+            self.exists_action,
+            {
+                True: "action",  # If there are tool calls, go to action
+                False: END  # If no tool calls, end
+            }
+        )
+        
+        graph.add_edge("action", "llm")  # After action, go back to LLM for more tool calls or final response
         
         # Set the entry point
-        graph.set_entry_point("llm")
+        graph.set_entry_point("reasoning")
         
         # Compile the graph
         self.graph = graph.compile()
+
+    def reason_about_request(self, state: AgentState):
+        """Reason about the user's request and determine what information is needed."""
+        messages = state['messages']
+        
+        # Create system message for reasoning
+        reasoning_system = """You are a helpful assistant for Budapest tourism and transit information.
+Your task is to analyze the user's request and decide:
+1. What is the user asking for?
+2. What tools would be most appropriate to help fulfill this request?
+3. What specific information do you need to gather?
+
+Respond in the following format:
+```reasoning
+[Your detailed reasoning about what the user is asking and what information you need to gather]
+```
+
+```decision
+[Either "use_tools" if you need to use tools to fulfill this request, or "respond_directly" if you can answer without tools]
+```
+
+Do NOT try to answer the user's question yet - just analyze what would be needed to answer it.
+"""
+        
+        # Add system message for reasoning
+        reasoning_messages = [SystemMessage(content=reasoning_system)]
+        
+        # Add regular messages
+        for msg in messages:
+            reasoning_messages.append(msg)
+        
+        # Call the model for reasoning
+        reasoning_response = self.reason_model.invoke(reasoning_messages)
+        
+        # Extract reasoning and decision
+        reasoning_match = re.search(r'```reasoning\s*(.*?)\s*```', reasoning_response.content, re.DOTALL)
+        decision_match = re.search(r'```decision\s*(.*?)\s*```', reasoning_response.content, re.DOTALL)
+        
+        reasoning = reasoning_match.group(1).strip() if reasoning_match else "No explicit reasoning provided."
+        next_step = decision_match.group(1).strip() if decision_match else "use_tools"  # Default to using tools
+        
+        # If the decision is to respond directly, create a response
+        if next_step == "respond_directly":
+            # Create direct response prompt
+            direct_response_system = self.system + """
+Since the user's question can be answered directly without tools, provide a helpful response based on your general knowledge about Budapest.
+"""
+            # Create messages for direct response
+            direct_response_messages = [SystemMessage(content=direct_response_system)]
+            direct_response_messages.extend(messages)
+            
+            # Get direct response
+            direct_response = self.model.invoke(direct_response_messages)
+            
+            # Add direct response to messages
+            messages.append(direct_response)
+        
+        # Return updated state with reasoning and next step
+        return {
+            'messages': messages if next_step == "respond_directly" else messages,
+            'reasoning': reasoning,
+            'next_step': next_step
+        }
+
+    def determine_next_step(self, state: AgentState):
+        """Determine whether to use tools or respond directly."""
+        return state.get('next_step', 'use_tools')
 
     def exists_action(self, state: AgentState):
         """Check if the last message contains any tool calls."""
@@ -300,16 +343,36 @@ class Agent:
     def call_openai(self, state: AgentState):
         """Call the language model to generate a response or tool calls."""
         messages = state['messages']
+        reasoning = state.get('reasoning', '')
         
-        # Add system message if not present
-        if self.system and not any(isinstance(msg, SystemMessage) for msg in messages):
-            messages = [SystemMessage(content=self.system)] + messages
+        # Add system message if not present, including the reasoning
+        if self.system:
+            tool_system = self.system + f"""
+I've analyzed the user's request and here's my reasoning:
+{reasoning}
+
+Based on this reasoning, I'll now use the appropriate tools to help answer the query.
+"""
+            # Replace existing system message or add new one
+            has_system = False
+            for i, msg in enumerate(messages):
+                if isinstance(msg, SystemMessage):
+                    messages[i] = SystemMessage(content=tool_system)
+                    has_system = True
+                    break
             
+            if not has_system:
+                messages = [SystemMessage(content=tool_system)] + messages
+        
         # Call the model and get a response
         message = self.model.invoke(messages)
         
         # Return the updated state with the new message
-        return {'messages': [message]}
+        return {
+            'messages': [message],
+            'reasoning': reasoning,
+            'next_step': state.get('next_step')
+        }
 
     def take_action(self, state: AgentState):
         """Execute any tool calls from the language model."""
@@ -331,11 +394,15 @@ class Agent:
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
             
         # Return the updated state with the tool results
-        return {'messages': results}
+        return {
+            'messages': results,
+            'reasoning': state.get('reasoning'),
+            'next_step': state.get('next_step')
+        }
 
 # === System prompt for the agent ===
 prompt = """
-You are a helpful Hungarian assistant for Budapest public transport and sightseeing.
+You are a helpful assistant for Budapest public transport and sightseeing.
 You help tourists and locals navigate Budapest and discover interesting places.
 
 Follow these steps when responding to users:
@@ -343,7 +410,14 @@ Follow these steps when responding to users:
 1. For route planning:
    - Extract origin and destination from user input using parse_input_tool
    - Call directions_tool with both locations to get a route
-   - Format the route results in a user-friendly way with format_route_summary
+   - Format the route results into a user-friendly summary following these guidelines:
+     * Start with a header showing origin → destination
+     * Include the total duration and distance
+     * List each step of the journey with appropriate icons:
+       - 🚆 for transit vehicles (showing line numbers, vehicle types, and stop names)
+       - 🚶 for walking segments (showing duration)
+     * Format step numbers and use clear arrows (→) between locations
+     * For transit steps, include: line number, vehicle type, departure stop, and arrival stop
    - If the user specifies a transportation mode (walking, bicycling, driving), use that mode
 
 2. For attraction recommendations:
@@ -361,8 +435,19 @@ IMPORTANT RULES:
 - When users ask about attractions in Budapest, always use the web search capability
 - First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
 - Explicitly state that information comes from "web search" in your responses
-   
-Always respond in Hungarian unless the user specifically asks in another language.
+- When formatting route information from directions_tool, pay special attention to:
+  * Use a consistent, readable format with proper spacing and organization
+  * For transit routes, clearly indicate line numbers and vehicle types (bus, tram, metro)
+  * Include emojis to represent different transportation modes (🚆, 🚍, 🚇, 🚶)
+  * Format durations and distances in a readable way
+  * Structure step-by-step directions with clear numbering
+  * Handle error cases gracefully (route not found, invalid locations)
+- Always end your responses with 1-2 relevant follow-up questions based on the information provided:
+  * For route planning: Ask about attractions or restaurants near the destination
+  * For attraction information: Ask if they want to know about nearby places or how to get there
+  * For general queries: Suggest related topics or activities in Budapest
+
+Always respond in the same language the user used to ask their question.
 Be helpful, friendly, and provide concise but complete information.
 """
 
@@ -375,8 +460,7 @@ tools = [
     directions_tool, 
     attractions_tool,
     extract_attractions_tool,
-    attraction_info_tool,
-    format_route_summary
+    attraction_info_tool
 ]
 
 # Create the agent instance
