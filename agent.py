@@ -1,8 +1,8 @@
 # agent.py
 # LangGraph-based agent for Budapest tourism and transit information
-# Modified with dedicated reasoning node and fixed response handling
+# Simplified finalization approach
 # Author: Szalay Miklós Márton
-# Thesis project for Pannon University
+# Modified by: Claude 3.7 Sonnet
 
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
@@ -221,6 +221,7 @@ class AgentState(TypedDict):
     next_step: Optional[str]  # What action to take next
     tool_history: Annotated[list[Dict], operator.add]  # Track tool calls and results for final response
     has_used_tools: Optional[bool]  # Track if any tools have been used
+    user_query: Optional[str]  # Store the original user query
 
 # === Agent class to manage the conversation flow ===
 class Agent:
@@ -234,6 +235,9 @@ class Agent:
         
         # Create reason model without tools binding
         self.reason_model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.1)
+        
+        # Create finalize model without tools binding
+        self.finalize_model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.7)
 
         # Create a graph with four nodes: reasoning, LLM, action, and finalize
         graph = StateGraph(AgentState)
@@ -284,6 +288,10 @@ class Agent:
     def reason_about_request(self, state: AgentState):
         """Reason about the user's request and determine what information is needed."""
         messages = state['messages']
+        
+        # Store the original user query
+        user_messages = [msg for msg in messages if isinstance(msg, HumanMessage)]
+        user_query = user_messages[-1].content if user_messages else ""
         
         # Create system message for reasoning
         reasoning_system = """You are a helpful assistant for Budapest tourism and transit information.
@@ -343,7 +351,8 @@ Since the user's question can be answered directly without tools, provide a help
             'reasoning_output': reasoning,
             'next_step': next_step,
             'tool_history': [],
-            'has_used_tools': False
+            'has_used_tools': False,
+            'user_query': user_query
         }
 
     def determine_next_step(self, state: AgentState):
@@ -358,14 +367,12 @@ Since the user's question can be answered directly without tools, provide a help
     def should_continue(self, state: AgentState):
         """
         Determine if we should continue with more tool calls or proceed to finalize.
-        If the last 3 tool call sequences have been the same, we stop to avoid loops.
         """
-        # Set the has_used_tools flag to true since we've executed at least one tool
-        has_used_tools = True
-        
         # Check if the last message is an AI message with tool calls
         last_message = state['messages'][-1]
-        return hasattr(last_message, 'tool_calls') and len(getattr(last_message, 'tool_calls', [])) > 0
+        has_more_tools = hasattr(last_message, 'tool_calls') and len(getattr(last_message, 'tool_calls', [])) > 0
+        
+        return has_more_tools
 
     def call_openai(self, state: AgentState):
         """Call the language model to generate a response or tool calls."""
@@ -400,7 +407,8 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
             'reasoning_output': reasoning,
             'next_step': state.get('next_step'),
             'tool_history': state.get('tool_history', []),
-            'has_used_tools': state.get('has_used_tools', False)
+            'has_used_tools': state.get('has_used_tools', False),
+            'user_query': state.get('user_query', '')
         }
 
     def take_action(self, state: AgentState):
@@ -436,7 +444,8 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
             'reasoning_output': state.get('reasoning_output'),
             'next_step': state.get('next_step'),
             'tool_history': tool_history,
-            'has_used_tools': True
+            'has_used_tools': True,
+            'user_query': state.get('user_query', '')
         }
 
     def finalize_response(self, state: AgentState):
@@ -445,56 +454,66 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
         reasoning = state.get('reasoning_output', '')
         tool_history = state.get('tool_history', [])
         has_used_tools = state.get('has_used_tools', False)
+        user_query = state.get('user_query', '')
         
         # If we haven't used any tools, the last message should already be the final response
         if not has_used_tools:
             return state
         
-        # Prepare the final response prompt
-        final_system = self.system + f"""
-I've analyzed the user's request and gathered information using various tools.
+        # Create a message to summarize findings for the finalization model
+        finalization_prompt = f"""
+Your job is to respond to this user query about Budapest:
+"{user_query}"
 
-My initial reasoning was:
+Here's my analysis of what they're asking:
 {reasoning}
 
-Here is a summary of the tools I used and the information I gathered:
+I've gathered information using these tools:
 """
         
-        # Add tool history summary
         for i, tool in enumerate(tool_history):
-            final_system += f"\n{i+1}. Used {tool['tool']} with args {tool['args']}\n"
-            # Truncate long results
+            tool_name = tool['tool']
+            args_str = str(tool['args'])
             result_str = str(tool['result'])
-            if len(result_str) > 300:
-                result_str = result_str[:300] + "... [truncated]"
-            final_system += f"   Result: {result_str}\n"
             
-        final_system += """
-Now, please provide a comprehensive final response to the user based on all this information.
-Make sure to format the information clearly and include all relevant details.
-If appropriate, include any follow-up questions or suggestions.
+            # Truncate long content
+            if len(args_str) > 100:
+                args_str = args_str[:100] + "..."
+            if len(result_str) > 300:
+                result_str = result_str[:300] + "..."
+                
+            finalization_prompt += f"\n{i+1}. Used {tool_name} with args: {args_str}\n"
+            finalization_prompt += f"   Result: {result_str}\n"
+        
+        finalization_prompt += """
+Please create a helpful, informative response that answers their question.
+
+Follow these formatting guidelines:
+- For route information, use emojis (🚆, 🚍, 🚇, 🚶) and clear numbering
+- For attractions, mention that info comes from web search
+- Use the same language the user used in their query
+- End with 1-2 relevant follow-up questions
+
+Your response should be comprehensive, well-organized, and user-friendly.
 """
         
-        # Get all user messages
-        user_messages = [msg for msg in state['messages'] if isinstance(msg, HumanMessage)]
+        # Create a system message with our original prompt
+        final_messages = [
+            SystemMessage(content=self.system),
+            HumanMessage(content=finalization_prompt)
+        ]
         
-        # Create final message list with system and user messages
-        final_messages = [SystemMessage(content=final_system)] + user_messages
+        # Generate the final response
+        final_response = self.finalize_model.invoke(final_messages)
         
-        # Add tool messages
-        tool_messages = [msg for msg in state['messages'] if isinstance(msg, ToolMessage)]
-        final_messages.extend(tool_messages)
-        
-        # Call the model for final response
-        final_response = self.model.invoke(final_messages)
-        
-        # Return the updated state with the final response
+        # Return state with the final response added to messages
         return {
             'messages': messages + [final_response],
             'reasoning_output': reasoning,
             'next_step': state.get('next_step'),
             'tool_history': tool_history,
-            'has_used_tools': has_used_tools
+            'has_used_tools': has_used_tools,
+            'user_query': user_query
         }
 
 # === System prompt for the agent ===
