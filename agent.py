@@ -218,7 +218,6 @@ Return a list where each name is followed by its description.
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
     messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
-    reasoning: Annotated[str, operator.add]  # The reasoning accumulates
 
 # === Reasoning prompt for the planning step ===
 REASONING_PROMPT = """
@@ -238,8 +237,7 @@ Available tools:
 - extract_attractions_tool: Identifies attraction names in the user's query
 - attraction_info_tool: Gets detailed information about attractions from web search
 
-Your output will NOT be shown to the user directly - it's for internal planning.
-Format your response as a clear, step-by-step plan. 
+Format your response as a clear, step-by-step plan.
 DO NOT write any actual tool calls or code - just describe what you plan to do.
 """
 
@@ -257,13 +255,13 @@ class Agent:
         graph = StateGraph(AgentState)
         
         # Add nodes
-        graph.add_node("reasoning", self.reason)  # New reasoning node
+        graph.add_node("reason", self.add_reasoning)  # New reasoning node
         graph.add_node("llm", self.call_openai)  # Node for generating responses or tool calls
         graph.add_node("action", self.take_action)  # Node for executing tools
         
         # Add edges to define the flow:
         # Start with reasoning -> then LLM -> then possibly action -> back to LLM -> end
-        graph.add_edge("reasoning", "llm")
+        graph.add_edge("reason", "llm")
         
         graph.add_conditional_edges(
             "llm",  # From the LLM node
@@ -273,7 +271,7 @@ class Agent:
         graph.add_edge("action", "llm")  # After action, go back to LLM
         
         # Set the entry point to reasoning (the new first step)
-        graph.set_entry_point("reasoning")
+        graph.set_entry_point("reason")
         
         # Compile the graph
         self.graph = graph.compile()
@@ -283,14 +281,14 @@ class Agent:
         result = state['messages'][-1]
         return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
 
-    def reason(self, state: AgentState):
-        """New reasoning step that plans approach before taking action."""
+    def add_reasoning(self, state: AgentState):
+        """Add reasoning as a message in the state."""
         messages = state['messages']
         last_message = messages[-1] if messages else None
         
         # Only reason about human messages
         if not isinstance(last_message, HumanMessage):
-            return {'messages': [], 'reasoning': ""}
+            return {'messages': []}
             
         # Create reasoning prompt with user's query
         reasoning_messages = [
@@ -302,24 +300,26 @@ class Agent:
         reasoning_response = reasoning_llm.invoke(reasoning_messages)
         reasoning_content = reasoning_response.content
         
-        # Return the reasoning without modifying the messages
-        return {'messages': [], 'reasoning': reasoning_content}
+        # Create a system message with reasoning to add to the state
+        reasoning_msg = SystemMessage(content=f"### Reasoning Plan:\n{reasoning_content}\n\n### Now execute this plan to help the user.")
+        
+        # Return the reasoning as a message to be added to the state
+        return {'messages': [reasoning_msg]}
 
     def call_openai(self, state: AgentState):
         """Call the language model to generate a response or tool calls."""
         messages = state['messages']
         
-        # Add system message if not present
-        if self.system and not any(isinstance(msg, SystemMessage) for msg in messages):
-            # Include the reasoning in the system message to guide the model
-            combined_system = f"{self.system}\n\nHere is your reasoning plan for this request:\n{state['reasoning']}"
-            messages = [SystemMessage(content=combined_system)] + messages
+        # Add original system message if not present
+        if self.system and not any(m.content == self.system for m in messages if isinstance(m, SystemMessage)):
+            system_msg = SystemMessage(content=self.system)
+            messages = [system_msg] + messages
             
         # Call the model and get a response
         message = self.model.invoke(messages)
         
         # Return the updated state with the new message
-        return {'messages': [message], 'reasoning': ""}
+        return {'messages': [message]}
 
     def take_action(self, state: AgentState):
         """Execute any tool calls from the language model."""
@@ -341,7 +341,7 @@ class Agent:
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
             
         # Return the updated state with the tool results
-        return {'messages': results, 'reasoning': ""}
+        return {'messages': results}
 
 # === System prompt for the agent ===
 prompt = """
