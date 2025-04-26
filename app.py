@@ -35,6 +35,10 @@ if "active_tab" not in st.session_state:
 if "itinerary" not in st.session_state:
     st.session_state.itinerary = None
 
+# Initialize session state for reasoning storage
+if "reasoning_history" not in st.session_state:
+    st.session_state.reasoning_history = []
+
 # Function to change tabs
 def set_tab(tab_name):
     st.session_state.active_tab = tab_name
@@ -101,6 +105,12 @@ def extract_reasoning(messages):
                 return match.group(1).strip()
     return None
 
+# Filter out system messages with reasoning
+def filter_display_messages(messages):
+    return [msg for msg in messages if not (
+        isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content
+    )]
+
 # Display different content based on active tab
 if st.session_state.active_tab == "chat":
     # CHAT TAB
@@ -110,6 +120,9 @@ if st.session_state.active_tab == "chat":
     # Define show_tools variable (always True now that toggle is removed)
     show_tools = True
     
+    # Get display-friendly message list
+    display_messages = filter_display_messages(st.session_state.messages)
+    
     # Layout based on debug mode
     if debug_mode:
         # Split screen into chat and debug panels
@@ -118,7 +131,7 @@ if st.session_state.active_tab == "chat":
         # Main chat in first column
         with cols[0]:
             # Display chat history (excluding system messages with reasoning)
-            for message in st.session_state.messages:
+            for message in display_messages:
                 if isinstance(message, HumanMessage):
                     with st.chat_message("user"):
                         st.write(message.content)
@@ -132,7 +145,6 @@ if st.session_state.active_tab == "chat":
                             st.text(message.content[:300] + "...")
                         else:
                             st.text(message.content)
-                # Skip displaying SystemMessage in chat
             
             # User input
             user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
@@ -141,16 +153,24 @@ if st.session_state.active_tab == "chat":
         with cols[1]:
             st.title("🔍 Developer Mode")
             
-            # Extract and display reasoning from the latest interaction
-            if st.session_state.messages:
-                reasoning = extract_reasoning(st.session_state.messages)
-                if reasoning:
-                    with st.expander("💡 Reasoning Process", expanded=True):
-                        st.markdown(reasoning)
+            # Display reasoning history
+            if st.session_state.reasoning_history:
+                with st.expander("💡 Reasoning Process", expanded=True):
+                    st.markdown("### Latest Reasoning:")
+                    st.markdown(st.session_state.reasoning_history[-1])
+                    
+                    if len(st.session_state.reasoning_history) > 1:
+                        with st.expander("Previous Reasoning", expanded=False):
+                            for i, reasoning in enumerate(st.session_state.reasoning_history[:-1]):
+                                st.markdown(f"#### Query {i+1}")
+                                st.markdown(reasoning)
+                                st.markdown("---")
             
             if st.session_state.debug_info:
-                for i, interaction in enumerate(st.session_state.debug_info):
-                    with st.expander(f"Query {i+1}: {interaction['user_query'][:30]}...", expanded=(i == len(st.session_state.debug_info)-1)):
+                with st.expander("Tool Calls", expanded=True):
+                    for i, interaction in enumerate(st.session_state.debug_info):
+                        st.markdown(f"#### Query {i+1}: {interaction['user_query'][:30]}...")
+                        
                         # Display tool calls
                         for step in interaction['steps']:
                             if step['step'] == 'tool_call':
@@ -163,7 +183,7 @@ if st.session_state.active_tab == "chat":
     else:
         # Simple chat layout without debug panel
         # Display chat history (excluding system messages with reasoning)
-        for message in st.session_state.messages:
+        for message in display_messages:
             if isinstance(message, HumanMessage):
                 with st.chat_message("user"):
                     st.write(message.content)
@@ -177,7 +197,6 @@ if st.session_state.active_tab == "chat":
                         st.text(message.content[:300] + "...")
                     else:
                         st.text(message.content)
-            # Skip displaying SystemMessage in chat
         
         # User input
         user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
@@ -206,8 +225,12 @@ if st.session_state.active_tab == "chat":
             with st.spinner("Gondolkodom..."):
                 # Get context from previous messages
                 agent_input = st.session_state.messages[-1]
-                previous_messages = st.session_state.messages[:-1]
-                all_messages = previous_messages + [agent_input]
+                
+                # Filter system messages with reasoning from previous messages
+                filtered_previous_messages = filter_display_messages(st.session_state.messages[:-1])
+                
+                # Combine filtered previous messages with the current input
+                all_messages = filtered_previous_messages + [agent_input]
                 
                 try:
                     # Track tool usage for debugging
@@ -223,21 +246,30 @@ if st.session_state.active_tab == "chat":
                         {"recursion_limit": 10}
                     )
                     
-                    # Get all messages
+                    # Get all result messages
                     all_result_messages = result["messages"]
                     
-                    # Filter out SystemMessages containing reasoning for display
-                    display_messages = [msg for msg in all_result_messages if not (isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content)]
+                    # Extract reasoning and store it 
+                    reasoning = extract_reasoning(all_result_messages)
+                    if reasoning:
+                        st.session_state.reasoning_history.append(reasoning)
                     
-                    # Get the final response (last non-system message)
+                    # Filter out SystemMessages containing reasoning for display
+                    display_result_messages = [
+                        msg for msg in all_result_messages if not (
+                            isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content
+                        )
+                    ]
+                    
+                    # Get the final response (last AIMessage)
                     final_response = None
                     for msg in reversed(all_result_messages):
                         if isinstance(msg, AIMessage):
                             final_response = msg
                             break
                     
-                    if not final_response and display_messages:
-                        final_response = display_messages[-1]
+                    if not final_response and display_result_messages:
+                        final_response = display_result_messages[-1]
                     
                     # Track tool calls for debugging and summary
                     for message in all_result_messages:
@@ -277,7 +309,7 @@ if st.session_state.active_tab == "chat":
                     # Add debug info to session state
                     st.session_state.debug_info.append(current_debug_info)
                     
-                    # Save all messages to chat history
+                    # Save all result messages to chat history
                     st.session_state.messages.extend(all_result_messages)
                     
                     # Display the response with tool summary
