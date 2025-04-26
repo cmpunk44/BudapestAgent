@@ -157,12 +157,13 @@ if st.session_state.active_tab == "chat":
                     st.markdown("### Latest Reasoning:")
                     st.markdown(st.session_state.reasoning_history[-1])
                     
+                    # Korábbi reasoning-ek megjelenítése beágyazott expander nélkül
                     if len(st.session_state.reasoning_history) > 1:
-                        with st.expander("Previous Reasoning", expanded=False):
-                            for i, reasoning in enumerate(st.session_state.reasoning_history[:-1]):
-                                st.markdown(f"#### Query {i+1}")
-                                st.markdown(reasoning)
-                                st.markdown("---")
+                        st.markdown("### Previous Reasoning:")
+                        for i, reasoning in enumerate(st.session_state.reasoning_history[:-1]):
+                            st.markdown(f"#### Query {i+1}")
+                            st.markdown(reasoning)
+                            st.markdown("---")
             
             if st.session_state.debug_info:
                 with st.expander("Tool Calls", expanded=True):
