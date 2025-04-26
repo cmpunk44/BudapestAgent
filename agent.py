@@ -1,6 +1,6 @@
 # agent.py
-# LangGraph-based agent for Budapest tourism and transit information
-# Simplified finalization approach
+# Improved LangGraph-based agent for Budapest tourism and transit information
+# Using assistant → reason → action → assistant flow pattern
 # Author: Szalay Miklós Márton
 # Modified by: Claude 3.7 Sonnet
 
@@ -217,11 +217,10 @@ Return a list where each name is followed by its description.
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
     messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
-    reasoning_output: Optional[str]  # The reasoning behind the current decision
-    next_step: Optional[str]  # What action to take next
-    tool_history: Annotated[list[Dict], operator.add]  # Track tool calls and results for final response
-    has_used_tools: Optional[bool]  # Track if any tools have been used
-    user_query: Optional[str]  # Store the original user query
+    reasoning: Optional[str]  # The reasoning behind the current decision
+    needs_more_tools: Optional[bool]  # Whether we need more tools or can generate a response
+    tool_history: Annotated[list[Dict], operator.add]  # Track tool calls and results
+    user_query: Optional[str]  # The original user query for context
 
 # === Agent class to manage the conversation flow ===
 class Agent:
@@ -233,68 +232,78 @@ class Agent:
         self.model = model.bind_tools(tools)
         self.tools = {t.name: t for t in tools}
         
-        # Create reason model without tools binding
+        # Create reason model with lower temperature for analysis
         self.reason_model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.1)
         
-        # Create finalize model without tools binding
-        self.finalize_model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.7)
+        # Create assistant model with slightly higher temperature for more engaging responses
+        self.assistant_model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.7)
 
-        # Create a graph with four nodes: reasoning, LLM, action, and finalize
+        # Create a graph with three nodes: assistant, reason, and action
         graph = StateGraph(AgentState)
         
         # Add nodes
-        graph.add_node("reason", self.reason_about_request)  # Node for reasoning about the request
-        graph.add_node("llm", self.call_openai)  # Node for generating tool calls
-        graph.add_node("action", self.take_action)  # Node for executing tools
-        graph.add_node("finalize", self.finalize_response)  # Node for generating final response
+        graph.add_node("assistant", self.assistant)  # Makes decisions and generates responses
+        graph.add_node("reason", self.reason)  # Analyzes what information is needed
+        graph.add_node("action", self.action)  # Executes tools
         
-        # Add conditional edges
+        # Add edges
+        # Always start by going from assistant to reason
+        graph.add_edge("assistant", "reason")
+        
+        # Based on reasoning, either perform an action or end
         graph.add_conditional_edges(
             "reason",
-            self.determine_next_step,
+            self.needs_tools,
             {
-                "use_tools": "llm",  # If tools are needed, go to LLM
-                "respond_directly": END  # If no tools needed, go to end
+                True: "action",  # If tools are needed, go to action
+                False: END  # If no tools needed, end
             }
         )
         
-        graph.add_conditional_edges(
-            "llm",
-            self.exists_action,
-            {
-                True: "action",  # If there are tool calls, go to action
-                False: "finalize"  # If no tool calls, go to finalize
-            }
-        )
-        
-        graph.add_conditional_edges(
-            "action",
-            self.should_continue,
-            {
-                True: "llm",  # If need more tools, go back to LLM
-                False: "finalize"  # If we're done with tools, go to finalize
-            }
-        )
-        
-        # After finalize, always end
-        graph.add_edge("finalize", END)
+        # After action, always go back to assistant for next decision
+        graph.add_edge("action", "assistant")
         
         # Set the entry point
-        graph.set_entry_point("reason")
+        graph.set_entry_point("assistant")
         
         # Compile the graph
         self.graph = graph.compile()
 
-    def reason_about_request(self, state: AgentState):
+    def needs_tools(self, state: AgentState):
+        """Determine if we need to use tools based on the reasoning."""
+        return state.get('needs_more_tools', False)
+
+    def reason(self, state: AgentState):
         """Reason about the user's request and determine what information is needed."""
         messages = state['messages']
         
-        # Store the original user query
-        user_messages = [msg for msg in messages if isinstance(msg, HumanMessage)]
-        user_query = user_messages[-1].content if user_messages else ""
+        # Keep track of the user query and tool history
+        tool_history = state.get('tool_history', [])
         
-        # Create system message for reasoning
-        reasoning_system = """You are a helpful assistant for Budapest tourism and transit information.
+        # Get the most recent non-tool message (either human or AI)
+        recent_messages = [msg for msg in messages if not isinstance(msg, ToolMessage)]
+        current_message = recent_messages[-1] if recent_messages else None
+        
+        # If the most recent message is from the AI and has tool calls, this means
+        # we're in the middle of a tool-use cycle and should continue
+        if (isinstance(current_message, AIMessage) and 
+            hasattr(current_message, 'tool_calls') and 
+            getattr(current_message, 'tool_calls', [])):
+            
+            return {
+                'messages': messages,
+                'reasoning': state.get('reasoning', ''),
+                'needs_more_tools': True,
+                'tool_history': tool_history,
+                'user_query': state.get('user_query', '')
+            }
+        
+        # Otherwise, if the most recent message is from a human, we need to reason about it
+        if isinstance(current_message, HumanMessage):
+            user_query = current_message.content
+            
+            # Create system message for reasoning
+            reasoning_system = """You are a helpful assistant for Budapest tourism and transit information.
 Your task is to analyze the user's request and decide:
 1. What is the user asking for?
 2. What tools would be most appropriate to help fulfill this request?
@@ -311,111 +320,128 @@ Respond in the following format:
 
 Do NOT try to answer the user's question yet - just analyze what would be needed to answer it.
 """
-        
-        # Add system message for reasoning
-        reasoning_messages = [SystemMessage(content=reasoning_system)]
-        
-        # Add regular messages
-        for msg in messages:
-            reasoning_messages.append(msg)
-        
-        # Call the model for reasoning
-        reasoning_response = self.reason_model.invoke(reasoning_messages)
-        
-        # Extract reasoning and decision
-        reasoning_match = re.search(r'```reasoning\s*(.*?)\s*```', reasoning_response.content, re.DOTALL)
-        decision_match = re.search(r'```decision\s*(.*?)\s*```', reasoning_response.content, re.DOTALL)
-        
-        reasoning = reasoning_match.group(1).strip() if reasoning_match else "No explicit reasoning provided."
-        next_step = decision_match.group(1).strip() if decision_match else "use_tools"  # Default to using tools
-        
-        # If the decision is to respond directly, create a response
-        if next_step == "respond_directly":
-            # Create direct response prompt
-            direct_response_system = self.system + """
-Since the user's question can be answered directly without tools, provide a helpful response based on your general knowledge about Budapest.
-"""
-            # Create messages for direct response
-            direct_response_messages = [SystemMessage(content=direct_response_system)]
-            direct_response_messages.extend(messages)
             
-            # Get direct response
-            direct_response = self.model.invoke(direct_response_messages)
+            # Add system message for reasoning
+            reasoning_messages = [SystemMessage(content=reasoning_system), current_message]
             
-            # Add direct response to messages
-            messages.append(direct_response)
+            # Call the model for reasoning
+            reasoning_response = self.reason_model.invoke(reasoning_messages)
+            
+            # Extract reasoning and decision
+            reasoning_match = re.search(r'```reasoning\s*(.*?)\s*```', reasoning_response.content, re.DOTALL)
+            decision_match = re.search(r'```decision\s*(.*?)\s*```', reasoning_response.content, re.DOTALL)
+            
+            reasoning = reasoning_match.group(1).strip() if reasoning_match else "No explicit reasoning provided."
+            decision = decision_match.group(1).strip() if decision_match else "use_tools"  # Default to using tools
+            
+            # Determine if we need tools based on the decision
+            needs_more_tools = decision.lower() == "use_tools"
+            
+            # Return updated state
+            return {
+                'messages': messages,
+                'reasoning': reasoning,
+                'needs_more_tools': needs_more_tools,
+                'tool_history': [],  # Reset tool history for new query
+                'user_query': user_query
+            }
         
-        # Return updated state with reasoning and next step
+        # If we reach here, we're in a state where we don't need more tools
         return {
-            'messages': messages if next_step == "respond_directly" else messages,
-            'reasoning_output': reasoning,
-            'next_step': next_step,
-            'tool_history': [],
-            'has_used_tools': False,
-            'user_query': user_query
-        }
-
-    def determine_next_step(self, state: AgentState):
-        """Determine whether to use tools or respond directly."""
-        return state.get('next_step', 'use_tools')
-
-    def exists_action(self, state: AgentState):
-        """Check if the last message contains any tool calls."""
-        result = state['messages'][-1]
-        return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
-
-    def should_continue(self, state: AgentState):
-        """
-        Determine if we should continue with more tool calls or proceed to finalize.
-        """
-        # Check if the last message is an AI message with tool calls
-        last_message = state['messages'][-1]
-        has_more_tools = hasattr(last_message, 'tool_calls') and len(getattr(last_message, 'tool_calls', [])) > 0
-        
-        return has_more_tools
-
-    def call_openai(self, state: AgentState):
-        """Call the language model to generate a response or tool calls."""
-        messages = state['messages']
-        reasoning = state.get('reasoning_output', '')
-        
-        # Add system message if not present, including the reasoning
-        if self.system:
-            tool_system = self.system + f"""
-I've analyzed the user's request and here's my reasoning:
-{reasoning}
-
-Based on this reasoning, I'll now use the appropriate tools to help answer the query.
-"""
-            # Replace existing system message or add new one
-            has_system = False
-            for i, msg in enumerate(messages):
-                if isinstance(msg, SystemMessage):
-                    messages[i] = SystemMessage(content=tool_system)
-                    has_system = True
-                    break
-            
-            if not has_system:
-                messages = [SystemMessage(content=tool_system)] + messages
-        
-        # Call the model and get a response
-        message = self.model.invoke(messages)
-        
-        # Return the updated state with the new message
-        return {
-            'messages': [message],
-            'reasoning_output': reasoning,
-            'next_step': state.get('next_step'),
-            'tool_history': state.get('tool_history', []),
-            'has_used_tools': state.get('has_used_tools', False),
+            'messages': messages,
+            'reasoning': state.get('reasoning', ''),
+            'needs_more_tools': False,
+            'tool_history': tool_history,
             'user_query': state.get('user_query', '')
         }
 
-    def take_action(self, state: AgentState):
-        """Execute any tool calls from the language model."""
-        tool_calls = state['messages'][-1].tool_calls
-        results = []
+    def assistant(self, state: AgentState):
+        """
+        Central node that either selects tools or generates a final response.
+        This is the brain of the agent that makes decisions.
+        """
+        messages = state['messages']
+        reasoning = state.get('reasoning', '')
         tool_history = state.get('tool_history', [])
+        user_query = state.get('user_query', '')
+        
+        # Get all tool messages to provide context
+        tool_messages = [msg for msg in messages if isinstance(msg, ToolMessage)]
+        
+        # Check if we're just starting or returning after tool use
+        ai_messages = [msg for msg in messages if isinstance(msg, AIMessage)]
+        human_messages = [msg for msg in messages if isinstance(msg, HumanMessage)]
+        
+        # If we have no AI messages yet or the last message was a tool result
+        if not ai_messages or isinstance(messages[-1], ToolMessage):
+            # We need to decide whether to use more tools or generate a final response
+            
+            # Create a context-specific system message
+            tools_used_summary = ""
+            if tool_history:
+                tools_used_summary = "\nI've already used these tools:\n"
+                for i, tool in enumerate(tool_history):
+                    tool_name = tool['tool']
+                    args_summary = str(tool['args'])[:50] + "..." if len(str(tool['args'])) > 50 else str(tool['args'])
+                    tools_used_summary += f"{i+1}. {tool_name} with args {args_summary}\n"
+            
+            system_content = self.system + f"""
+Based on my reasoning, I understand the user is asking about: {user_query}
+
+My reasoning about what information is needed:
+{reasoning}
+{tools_used_summary}
+
+Based on this information:
+1. If I still need more information, I should select the appropriate tool to collect it
+2. If I have enough information, I should provide a comprehensive response to the user's query
+"""
+            
+            # Create a focused list of messages for the model
+            focused_messages = [SystemMessage(content=system_content)]
+            
+            # Add the original user query
+            if human_messages:
+                focused_messages.append(human_messages[-1])
+            
+            # Add tool messages to provide context
+            if tool_messages:
+                # If there are many tool messages, just take the most recent ones
+                focused_messages.extend(tool_messages[-5:])
+            
+            # Call the model to either select tools or generate a response
+            message = self.model.invoke(focused_messages)
+            
+            # If the message contains tool calls, we'll continue the flow
+            # Otherwise, it's a final response to the user
+            
+            # Return the updated state with the new message
+            return {
+                'messages': messages + [message],
+                'reasoning': reasoning,
+                'needs_more_tools': hasattr(message, 'tool_calls') and len(getattr(message, 'tool_calls', [])) > 0,
+                'tool_history': tool_history,
+                'user_query': user_query
+            }
+        
+        # If we already have AI messages and the last one is not a tool call,
+        # it means we've already generated a final response
+        return state
+
+    def action(self, state: AgentState):
+        """Execute any tool calls from the language model."""
+        messages = state['messages']
+        tool_history = state.get('tool_history', [])
+        
+        # Get the last message which should be an AI message with tool calls
+        last_message = messages[-1]
+        
+        # Safety check - if no tool calls, return state unchanged
+        if not hasattr(last_message, 'tool_calls') or not getattr(last_message, 'tool_calls', []):
+            return state
+        
+        tool_calls = last_message.tool_calls
+        results = []
         
         # Process each tool call
         for t in tool_calls:
@@ -432,6 +458,7 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
                         'args': t['args'],
                         'result': result
                     })
+                    
                 except Exception as e:
                     result = f"Error executing tool: {str(e)}"
                     
@@ -440,80 +467,11 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
             
         # Return the updated state with the tool results
         return {
-            'messages': results,
-            'reasoning_output': state.get('reasoning_output'),
-            'next_step': state.get('next_step'),
+            'messages': messages + results,
+            'reasoning': state.get('reasoning', ''),
+            'needs_more_tools': True,  # Always go back to assistant after action
             'tool_history': tool_history,
-            'has_used_tools': True,
             'user_query': state.get('user_query', '')
-        }
-
-    def finalize_response(self, state: AgentState):
-        """Generate a final response based on all the information gathered."""
-        messages = state['messages']
-        reasoning = state.get('reasoning_output', '')
-        tool_history = state.get('tool_history', [])
-        has_used_tools = state.get('has_used_tools', False)
-        user_query = state.get('user_query', '')
-        
-        # If we haven't used any tools, the last message should already be the final response
-        if not has_used_tools:
-            return state
-        
-        # Create a message to summarize findings for the finalization model
-        finalization_prompt = f"""
-Your job is to respond to this user query about Budapest:
-"{user_query}"
-
-Here's my analysis of what they're asking:
-{reasoning}
-
-I've gathered information using these tools:
-"""
-        
-        for i, tool in enumerate(tool_history):
-            tool_name = tool['tool']
-            args_str = str(tool['args'])
-            result_str = str(tool['result'])
-            
-            # Truncate long content
-            if len(args_str) > 100:
-                args_str = args_str[:100] + "..."
-            if len(result_str) > 300:
-                result_str = result_str[:300] + "..."
-                
-            finalization_prompt += f"\n{i+1}. Used {tool_name} with args: {args_str}\n"
-            finalization_prompt += f"   Result: {result_str}\n"
-        
-        finalization_prompt += """
-Please create a helpful, informative response that answers their question.
-
-Follow these formatting guidelines:
-- For route information, use emojis (🚆, 🚍, 🚇, 🚶) and clear numbering
-- For attractions, mention that info comes from web search
-- Use the same language the user used in their query
-- End with 1-2 relevant follow-up questions
-
-Your response should be comprehensive, well-organized, and user-friendly.
-"""
-        
-        # Create a system message with our original prompt
-        final_messages = [
-            SystemMessage(content=self.system),
-            HumanMessage(content=finalization_prompt)
-        ]
-        
-        # Generate the final response
-        final_response = self.finalize_model.invoke(final_messages)
-        
-        # Return state with the final response added to messages
-        return {
-            'messages': messages + [final_response],
-            'reasoning_output': reasoning,
-            'next_step': state.get('next_step'),
-            'tool_history': tool_history,
-            'has_used_tools': has_used_tools,
-            'user_query': user_query
         }
 
 # === System prompt for the agent ===
