@@ -220,14 +220,26 @@ if st.session_state.active_tab == "chat":
                     }
                     tool_summary = []
                     
-                    # Run the agent
+                    # Run the agent with the initial empty state for tool_history and has_used_tools
                     result = budapest_agent.graph.invoke(
-                        {"messages": all_messages, "reasoning_output": None, "next_step": None},
-                        {"recursion_limit": 10}
+                        {
+                            "messages": all_messages, 
+                            "reasoning_output": None, 
+                            "next_step": None,
+                            "tool_history": [],
+                            "has_used_tools": False
+                        },
+                        {"recursion_limit": 15}  # Increased recursion limit
                     )
                     
-                    # Get the final response
-                    final_response = result["messages"][-1]
+                    # Get the final response - should be the last message in the chain
+                    final_messages = result["messages"]
+                    ai_messages = [msg for msg in final_messages if isinstance(msg, AIMessage)]
+                    
+                    if ai_messages:
+                        final_response = ai_messages[-1]  # Get the last AI message
+                    else:
+                        final_response = final_messages[-1]  # Fallback to last message
                     
                     # Get the reasoning from the state
                     current_reasoning = result.get("reasoning_output", "No reasoning provided")
