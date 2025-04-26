@@ -217,7 +217,7 @@ Return a list where each name is followed by its description.
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
     messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
-    reasoning: Optional[str]  # The reasoning behind the current decision
+    reasoning_output: Optional[str]  # The reasoning behind the current decision - RENAMED FROM "reasoning"
     next_step: Optional[str]  # What action to take next
 
 # === Agent class to manage the conversation flow ===
@@ -236,14 +236,14 @@ class Agent:
         # Create a graph with three nodes: reasoning, LLM, and action
         graph = StateGraph(AgentState)
         
-        # Add nodes
-        graph.add_node("reasoning", self.reason_about_request)  # Node for reasoning about the request
+        # Add nodes - RENAMED "reasoning" to "reason"
+        graph.add_node("reason", self.reason_about_request)  # Node for reasoning about the request
         graph.add_node("llm", self.call_openai)  # Node for generating tool calls
         graph.add_node("action", self.take_action)  # Node for executing tools
         
         # Add conditional edges
         graph.add_conditional_edges(
-            "reasoning",
+            "reason",
             self.determine_next_step,
             {
                 "use_tools": "llm",  # If tools are needed, go to LLM
@@ -263,7 +263,7 @@ class Agent:
         graph.add_edge("action", "llm")  # After action, go back to LLM for more tool calls or final response
         
         # Set the entry point
-        graph.set_entry_point("reasoning")
+        graph.set_entry_point("reason")
         
         # Compile the graph
         self.graph = graph.compile()
@@ -327,7 +327,7 @@ Since the user's question can be answered directly without tools, provide a help
         # Return updated state with reasoning and next step
         return {
             'messages': messages if next_step == "respond_directly" else messages,
-            'reasoning': reasoning,
+            'reasoning_output': reasoning,  # RENAMED from 'reasoning'
             'next_step': next_step
         }
 
@@ -343,7 +343,7 @@ Since the user's question can be answered directly without tools, provide a help
     def call_openai(self, state: AgentState):
         """Call the language model to generate a response or tool calls."""
         messages = state['messages']
-        reasoning = state.get('reasoning', '')
+        reasoning = state.get('reasoning_output', '')  # RENAMED from 'reasoning'
         
         # Add system message if not present, including the reasoning
         if self.system:
@@ -370,7 +370,7 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
         # Return the updated state with the new message
         return {
             'messages': [message],
-            'reasoning': reasoning,
+            'reasoning_output': reasoning,  # RENAMED from 'reasoning'
             'next_step': state.get('next_step')
         }
 
@@ -396,7 +396,7 @@ Based on this reasoning, I'll now use the appropriate tools to help answer the q
         # Return the updated state with the tool results
         return {
             'messages': results,
-            'reasoning': state.get('reasoning'),
+            'reasoning_output': state.get('reasoning_output'),  # RENAMED from 'reasoning'
             'next_step': state.get('next_step')
         }
 
