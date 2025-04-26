@@ -305,4 +305,146 @@ else:
             # Starting location
             start_location = st.text_input(
                 "Kiindulási pont / Starting location:",
-                value="Deák Ferenc
+                value="Deák Ferenc tér"
+            )
+            
+            # Available time
+            available_time = st.slider(
+                "Rendelkezésre álló idő (óra) / Available time (hours):",
+                min_value=2,
+                max_value=12,
+                value=4,
+                step=1
+            )
+            
+            # Interests (multiselect)
+            interests = st.multiselect(
+                "Érdeklődési körök / Interests:",
+                options=[
+                    "Múzeumok / Museums",
+                    "Történelem / History",
+                    "Építészet / Architecture",
+                    "Gasztronómia / Food",
+                    "Természet / Nature",
+                    "Vásárlás / Shopping",
+                    "Művészet / Art",
+                    "Éjszakai élet / Nightlife"
+                ],
+                default=["Történelem / History", "Építészet / Architecture"]
+            )
+            
+            # Map the selected interests to English for processing
+            interest_map = {
+                "Múzeumok / Museums": "museums",
+                "Történelem / History": "history",
+                "Építészet / Architecture": "architecture",
+                "Gasztronómia / Food": "food",
+                "Természet / Nature": "nature",
+                "Vásárlás / Shopping": "shopping",
+                "Művészet / Art": "art",
+                "Éjszakai élet / Nightlife": "nightlife"
+            }
+            
+            # Transportation mode
+            itinerary_transport = st.selectbox(
+                "Közlekedési mód / Transportation mode:",
+                options=[
+                    "Tömegközlekedés / Transit",
+                    "Gyalogos / Walking",
+                    "Kerékpár / Bicycling",
+                    "Autó / Car"
+                ],
+                index=0
+            )
+            
+            # Map the transport mode
+            transport_map = {
+                "Tömegközlekedés / Transit": "transit",
+                "Gyalogos / Walking": "walking",
+                "Kerékpár / Bicycling": "bicycling",
+                "Autó / Car": "driving"
+            }
+            
+            # Special requests
+            special_requests = st.text_area(
+                "Egyéb kívánságok / Special requests:",
+                placeholder="Pl.: Szeretnék látni a Parlamentet... / E.g.: I'd like to see the Parliament..."
+            )
+            
+            # Submit button
+            submit_button = st.form_submit_button("Útiterv készítése / Create Itinerary")
+            
+            if submit_button:
+                # Show spinner during processing
+                with st.spinner("Útiterv készítése folyamatban... / Creating itinerary..."):
+                    # Prepare preferences
+                    preferences = {
+                        "start_location": start_location,
+                        "available_time": available_time,
+                        "interests": [interest_map[i] for i in interests],
+                        "transport_mode": transport_map[itinerary_transport],
+                        "special_requests": special_requests
+                    }
+                    
+                    # Call the itinerary function
+                    try:
+                        itinerary = create_itinerary(preferences)
+                        st.session_state.itinerary = itinerary
+                    except Exception as e:
+                        st.error(f"Hiba történt: {str(e)}")
+                        st.session_state.itinerary = "Sajnos hiba történt az útiterv készítése során."
+    
+    with col2:
+        # Display the itinerary if available
+        if st.session_state.itinerary:
+            st.subheader("Az útiterved / Your Itinerary")
+            st.markdown(st.session_state.itinerary)
+        else:
+            # Show instructions or sample itinerary
+            st.info("Töltsd ki az űrlapot az útiterv elkészítéséhez! / Fill out the form to create your itinerary!")
+            
+            with st.expander("Minta útiterv / Sample Itinerary"):
+                st.markdown("""
+                # Budapest Felfedezése - Egy Napos Útiterv
+                
+                ## Reggel 10:00 - Hősök tere
+                A Hősök tere Budapest egyik ikonikus látványossága, ahol megcsodálhatod a magyar történelem fontos alakjainak szobrait.
+                
+                **Időtartam:** 30 perc
+                
+                ## Reggel 10:30 - Városliget
+                Sétálj át a Városligetbe, ahol megtalálod a Vajdahunyad várát és a Széchenyi fürdőt.
+                
+                **Időtartam:** 1 óra
+                
+                ## Délelőtt 11:30 - Andrássy út
+                Haladj végig az Andrássy úton a belváros felé, útközben megcsodálhatod a gyönyörű épületeket.
+                
+                **Közlekedés:** M1-es metró, 10 perc
+                
+                ## Déli 12:30 - Ebéd a Gozsdu udvarban
+                Élvezd Budapest gasztronómiai kínálatát a Gozsdu udvar valamelyik éttermében.
+                
+                **Időtartam:** 1 óra
+                
+                ## Délután 14:00 - Szent István Bazilika
+                Látogasd meg Budapest legnagyobb templomát, ahonnan csodálatos kilátás nyílik a városra.
+                
+                **Időtartam:** 45 perc
+                
+                ## Délután 15:00 - Duna-part és Parlament
+                Sétálj le a Duna-partra és csodáld meg a magyar Parlamentet kívülről.
+                
+                **Közlekedés:** Gyalog, 15 perc
+                
+                ## Délután 16:00 - Lánchíd és Budai vár
+                Sétálj át a Lánchídon Budára, majd látogasd meg a Budai várat.
+                
+                **Időtartam:** 2 óra
+                
+                Ez csak egy minta útiterv. A te személyre szabott útiterved az érdeklődési köreid és a rendelkezésre álló időd alapján készül el.
+                """)
+
+# Simple footer
+st.markdown("---")
+st.caption("Fejlesztette: Szalay Miklós Márton | Pannon Egyetem")
