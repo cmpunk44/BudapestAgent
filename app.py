@@ -222,7 +222,7 @@ if st.session_state.active_tab == "chat":
                     
                     # Run the agent
                     result = budapest_agent.graph.invoke(
-                        {"messages": all_messages, "reasoning": None, "next_step": None},
+                        {"messages": all_messages, "reasoning_output": None, "next_step": None},
                         {"recursion_limit": 10}
                     )
                     
@@ -230,7 +230,7 @@ if st.session_state.active_tab == "chat":
                     final_response = result["messages"][-1]
                     
                     # Get the reasoning from the state
-                    current_reasoning = result.get("reasoning", "No reasoning provided")
+                    current_reasoning = result.get("reasoning_output", "No reasoning provided")
                     
                     # Store the reasoning for this response
                     st.session_state.reasoning.append(current_reasoning)
