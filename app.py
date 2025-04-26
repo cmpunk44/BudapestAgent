@@ -21,11 +21,18 @@ from agent import budapest_agent
 from itinerary_agent import create_itinerary  # Import the itinerary function
 
 # Initialize session state for chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if "user_messages" not in st.session_state:
+    st.session_state.user_messages = []  # Only user messages
+
+if "ai_messages" not in st.session_state:
+    st.session_state.ai_messages = []  # Only AI final responses
     
 if "debug_info" not in st.session_state:
     st.session_state.debug_info = []
+
+# Initialize separate state for raw message history (for agent)
+if "raw_messages" not in st.session_state:
+    st.session_state.raw_messages = []
 
 # Initialize session state for active tab
 if "active_tab" not in st.session_state:
@@ -105,23 +112,18 @@ def extract_reasoning(messages):
                 return match.group(1).strip()
     return None
 
-# Filter out system messages with reasoning
-def filter_display_messages(messages):
-    return [msg for msg in messages if not (
-        isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content
-    )]
+# Extract the final AI message from result messages
+def extract_final_response(messages):
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            return msg
+    return None
 
 # Display different content based on active tab
 if st.session_state.active_tab == "chat":
     # CHAT TAB
     # Main page title
     st.title("🇭🇺 Budapest Explorer - Chat")
-    
-    # Define show_tools variable (always True now that toggle is removed)
-    show_tools = True
-    
-    # Get display-friendly message list
-    display_messages = filter_display_messages(st.session_state.messages)
     
     # Layout based on debug mode
     if debug_mode:
@@ -130,21 +132,17 @@ if st.session_state.active_tab == "chat":
         
         # Main chat in first column
         with cols[0]:
-            # Display chat history (excluding system messages with reasoning)
-            for message in display_messages:
-                if isinstance(message, HumanMessage):
+            # Display clean chat history - just user questions and AI answers
+            for i in range(max(len(st.session_state.user_messages), len(st.session_state.ai_messages))):
+                # Display user message if available
+                if i < len(st.session_state.user_messages):
                     with st.chat_message("user"):
-                        st.write(message.content)
-                elif isinstance(message, AIMessage):
+                        st.write(st.session_state.user_messages[i])
+                
+                # Display AI response if available
+                if i < len(st.session_state.ai_messages):
                     with st.chat_message("assistant"):
-                        st.write(message.content)
-                elif isinstance(message, ToolMessage) and show_tools:
-                    with st.chat_message("system"):
-                        st.text(f"Tool: {message.name}")
-                        if len(message.content) > 300:
-                            st.text(message.content[:300] + "...")
-                        else:
-                            st.text(message.content)
+                        st.write(st.session_state.ai_messages[i])
             
             # User input
             user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
@@ -182,55 +180,49 @@ if st.session_state.active_tab == "chat":
                             st.markdown("---")
     else:
         # Simple chat layout without debug panel
-        # Display chat history (excluding system messages with reasoning)
-        for message in display_messages:
-            if isinstance(message, HumanMessage):
+        # Display clean chat history - just user questions and AI answers
+        for i in range(max(len(st.session_state.user_messages), len(st.session_state.ai_messages))):
+            # Display user message if available
+            if i < len(st.session_state.user_messages):
                 with st.chat_message("user"):
-                    st.write(message.content)
-            elif isinstance(message, AIMessage):
+                    st.write(st.session_state.user_messages[i])
+            
+            # Display AI response if available
+            if i < len(st.session_state.ai_messages):
                 with st.chat_message("assistant"):
-                    st.write(message.content)
-            elif isinstance(message, ToolMessage) and show_tools:
-                with st.chat_message("system"):
-                    st.text(f"Tool: {message.name}")
-                    if len(message.content) > 300:
-                        st.text(message.content[:300] + "...")
-                    else:
-                        st.text(message.content)
+                    st.write(st.session_state.ai_messages[i])
         
         # User input
         user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
     
     # Handle user input
     if user_prompt:
-        # Add user message to chat history
-        user_message = HumanMessage(content=user_prompt)
-        st.session_state.messages.append(user_message)
+        # Add user message to displayed messages
+        st.session_state.user_messages.append(user_prompt)
         
-        # Add transportation mode context if needed
-        if transport_mode != "Tömegközlekedés":
-            mode = transport_mode_map[transport_mode]
-            context_prompt = f"{user_prompt} (használj {mode} közlekedési módot)"
-            agent_input = HumanMessage(content=context_prompt)
-        else:
-            agent_input = user_message
+        # Add user message to raw messages for agent context
+        user_message = HumanMessage(content=user_prompt)
+        st.session_state.raw_messages.append(user_message)
         
         # Rerun to display the new user message
         st.rerun()
     
     # Process the agent response if there's a pending user message
-    if st.session_state.messages and isinstance(st.session_state.messages[-1], HumanMessage):
+    if len(st.session_state.user_messages) > len(st.session_state.ai_messages):
         # Show a spinner while processing
         with st.chat_message("assistant"):
             with st.spinner("Gondolkodom..."):
-                # Get context from previous messages
-                agent_input = st.session_state.messages[-1]
+                # Get latest user message
+                agent_input = st.session_state.raw_messages[-1]
                 
-                # Filter system messages with reasoning from previous messages
-                filtered_previous_messages = filter_display_messages(st.session_state.messages[:-1])
+                # Get previous context 
+                previous_messages = st.session_state.raw_messages[:-1]
                 
-                # Combine filtered previous messages with the current input
-                all_messages = filtered_previous_messages + [agent_input]
+                # Add transportation mode context if needed
+                if transport_mode != "Tömegközlekedés":
+                    mode = transport_mode_map[transport_mode]
+                    modified_content = f"{agent_input.content} (használj {mode} közlekedési módot)"
+                    agent_input = HumanMessage(content=modified_content)
                 
                 try:
                     # Track tool usage for debugging
@@ -242,7 +234,7 @@ if st.session_state.active_tab == "chat":
                     
                     # Run the agent
                     result = budapest_agent.graph.invoke(
-                        {"messages": all_messages},
+                        {"messages": previous_messages + [agent_input]},
                         {"recursion_limit": 10}
                     )
                     
@@ -254,22 +246,8 @@ if st.session_state.active_tab == "chat":
                     if reasoning:
                         st.session_state.reasoning_history.append(reasoning)
                     
-                    # Filter out SystemMessages containing reasoning for display
-                    display_result_messages = [
-                        msg for msg in all_result_messages if not (
-                            isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content
-                        )
-                    ]
-                    
                     # Get the final response (last AIMessage)
-                    final_response = None
-                    for msg in reversed(all_result_messages):
-                        if isinstance(msg, AIMessage):
-                            final_response = msg
-                            break
-                    
-                    if not final_response and display_result_messages:
-                        final_response = display_result_messages[-1]
+                    final_response = extract_final_response(all_result_messages)
                     
                     # Track tool calls for debugging and summary
                     for message in all_result_messages:
@@ -309,28 +287,33 @@ if st.session_state.active_tab == "chat":
                     # Add debug info to session state
                     st.session_state.debug_info.append(current_debug_info)
                     
-                    # Save all result messages to chat history
-                    st.session_state.messages.extend(all_result_messages)
+                    # Save all result messages to raw message history (for agent context)
+                    st.session_state.raw_messages.extend(all_result_messages)
                     
-                    # Display the response with tool summary
+                    # Display and store the response
                     if final_response:
                         response_content = final_response.content
                         
-                        # If tool summary exists, add it to the response
-                        if tool_summary:
+                        # If tool summary exists, add it to the response in developer mode
+                        if tool_summary and debug_mode:
                             tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
                             response_with_tools = response_content + tool_section
                             st.write(response_with_tools)
+                            st.session_state.ai_messages.append(response_with_tools)
                         else:
                             # Just show the regular response
                             st.write(response_content)
+                            st.session_state.ai_messages.append(response_content)
                     else:
-                        st.error("No response generated")
+                        error_msg = "Sajnos nem sikerült választ generálni"
+                        st.error(error_msg)
+                        st.session_state.ai_messages.append(error_msg)
                     
                 except Exception as e:
                     # Simple error handling
-                    st.error(f"Hiba történt: {str(e)}")
-                    st.session_state.messages.append(AIMessage(content=f"Sajnos hiba történt: {str(e)}"))
+                    error_msg = f"Sajnos hiba történt: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.ai_messages.append(error_msg)
                 
                 # Rerun to reset UI state
                 st.rerun()
