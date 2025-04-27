@@ -1,7 +1,7 @@
 # app.py
 # Simple Streamlit UI for Budapest tourism and transit agent
 # Author: Szalay Miklós Márton
-# Modified to include itinerary planner
+# Modified to include itinerary planner and reasoning visualization
 # Thesis project for Pannon University
 
 import streamlit as st
@@ -15,16 +15,24 @@ st.set_page_config(
 )
 
 import json
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+import re
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from agent import budapest_agent
 from itinerary_agent import create_itinerary  # Import the itinerary function
 
 # Initialize session state for chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if "user_messages" not in st.session_state:
+    st.session_state.user_messages = []  # Only user messages
+
+if "ai_messages" not in st.session_state:
+    st.session_state.ai_messages = []  # Only AI final responses
     
 if "debug_info" not in st.session_state:
     st.session_state.debug_info = []
+
+# Initialize separate state for raw message history (for agent)
+if "raw_messages" not in st.session_state:
+    st.session_state.raw_messages = []
 
 # Initialize session state for active tab
 if "active_tab" not in st.session_state:
@@ -33,6 +41,10 @@ if "active_tab" not in st.session_state:
 # Initialize session state for itinerary
 if "itinerary" not in st.session_state:
     st.session_state.itinerary = None
+
+# Initialize session state for reasoning storage
+if "reasoning_history" not in st.session_state:
+    st.session_state.reasoning_history = []
 
 # Function to change tabs
 def set_tab(tab_name):
@@ -90,14 +102,28 @@ with st.sidebar:
         
     st.caption("© 2025 Budapest Explorer - Pannon Egyetem")
 
+# Function to extract reasoning from SystemMessage
+def extract_reasoning(messages):
+    for msg in messages:
+        if isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content:
+            # Extract the reasoning part
+            match = re.search(r"### Reasoning Plan:(.*?)###", msg.content, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+    return None
+
+# Extract the final AI message from result messages
+def extract_final_response(messages):
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            return msg
+    return None
+
 # Display different content based on active tab
 if st.session_state.active_tab == "chat":
     # CHAT TAB
     # Main page title
     st.title("🇭🇺 Budapest Explorer - Chat")
-    
-    # Define show_tools variable (always True now that toggle is removed)
-    show_tools = True
     
     # Layout based on debug mode
     if debug_mode:
@@ -106,21 +132,17 @@ if st.session_state.active_tab == "chat":
         
         # Main chat in first column
         with cols[0]:
-            # Display chat history
-            for message in st.session_state.messages:
-                if isinstance(message, HumanMessage):
+            # Display clean chat history - just user questions and AI answers
+            for i in range(max(len(st.session_state.user_messages), len(st.session_state.ai_messages))):
+                # Display user message if available
+                if i < len(st.session_state.user_messages):
                     with st.chat_message("user"):
-                        st.write(message.content)
-                elif isinstance(message, AIMessage):
+                        st.write(st.session_state.user_messages[i])
+                
+                # Display AI response if available
+                if i < len(st.session_state.ai_messages):
                     with st.chat_message("assistant"):
-                        st.write(message.content)
-                elif isinstance(message, ToolMessage) and show_tools:
-                    with st.chat_message("system"):
-                        st.text(f"Tool: {message.name}")
-                        if len(message.content) > 300:
-                            st.text(message.content[:300] + "...")
-                        else:
-                            st.text(message.content)
+                        st.write(st.session_state.ai_messages[i])
             
             # User input
             user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
@@ -129,9 +151,25 @@ if st.session_state.active_tab == "chat":
         with cols[1]:
             st.title("🔍 Developer Mode")
             
+            # Display reasoning history
+            if st.session_state.reasoning_history:
+                with st.expander("💡 Reasoning Process", expanded=True):
+                    st.markdown("### Latest Reasoning:")
+                    st.markdown(st.session_state.reasoning_history[-1])
+                    
+                    # Korábbi reasoning-ek megjelenítése beágyazott expander nélkül
+                    if len(st.session_state.reasoning_history) > 1:
+                        st.markdown("### Previous Reasoning:")
+                        for i, reasoning in enumerate(st.session_state.reasoning_history[:-1]):
+                            st.markdown(f"#### Query {i+1}")
+                            st.markdown(reasoning)
+                            st.markdown("---")
+            
             if st.session_state.debug_info:
-                for i, interaction in enumerate(st.session_state.debug_info):
-                    with st.expander(f"Query {i+1}: {interaction['user_query'][:30]}...", expanded=(i == len(st.session_state.debug_info)-1)):
+                with st.expander("Tool Calls", expanded=True):
+                    for i, interaction in enumerate(st.session_state.debug_info):
+                        st.markdown(f"#### Query {i+1}: {interaction['user_query'][:30]}...")
+                        
                         # Display tool calls
                         for step in interaction['steps']:
                             if step['step'] == 'tool_call':
@@ -143,51 +181,46 @@ if st.session_state.active_tab == "chat":
                             st.markdown("---")
     else:
         # Simple chat layout without debug panel
-        # Display chat history
-        for message in st.session_state.messages:
-            if isinstance(message, HumanMessage):
+        # Display clean chat history - just user questions and AI answers
+        for i in range(max(len(st.session_state.user_messages), len(st.session_state.ai_messages))):
+            # Display user message if available
+            if i < len(st.session_state.user_messages):
                 with st.chat_message("user"):
-                    st.write(message.content)
-            elif isinstance(message, AIMessage):
+                    st.write(st.session_state.user_messages[i])
+            
+            # Display AI response if available
+            if i < len(st.session_state.ai_messages):
                 with st.chat_message("assistant"):
-                    st.write(message.content)
-            elif isinstance(message, ToolMessage) and show_tools:
-                with st.chat_message("system"):
-                    st.text(f"Tool: {message.name}")
-                    if len(message.content) > 300:
-                        st.text(message.content[:300] + "...")
-                    else:
-                        st.text(message.content)
+                    st.write(st.session_state.ai_messages[i])
         
         # User input
         user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
     
     # Handle user input
     if user_prompt:
-        # Add user message to chat history
-        user_message = HumanMessage(content=user_prompt)
-        st.session_state.messages.append(user_message)
+        # Add user message to displayed messages
+        st.session_state.user_messages.append(user_prompt)
         
-        # Add transportation mode context if needed
-        if transport_mode != "Tömegközlekedés":
-            mode = transport_mode_map[transport_mode]
-            context_prompt = f"{user_prompt} (használj {mode} közlekedési módot)"
-            agent_input = HumanMessage(content=context_prompt)
-        else:
-            agent_input = user_message
+        # Add user message to raw messages for agent context
+        user_message = HumanMessage(content=user_prompt)
+        st.session_state.raw_messages.append(user_message)
         
         # Rerun to display the new user message
         st.rerun()
     
-    # Process the agent response if there's a pending user message
-    if st.session_state.messages and isinstance(st.session_state.messages[-1], HumanMessage):
+        # Process the agent response if there's a pending user message
+    if len(st.session_state.user_messages) > len(st.session_state.ai_messages):
         # Show a spinner while processing
         with st.chat_message("assistant"):
             with st.spinner("Gondolkodom..."):
-                # Get context from previous messages
-                agent_input = st.session_state.messages[-1]
-                previous_messages = st.session_state.messages[:-1]
-                all_messages = previous_messages + [agent_input]
+                # Get latest user message
+                agent_input = st.session_state.raw_messages[-1]
+                
+                # Add transportation mode context if needed
+                if transport_mode != "Tömegközlekedés":
+                    mode = transport_mode_map[transport_mode]
+                    modified_content = f"{agent_input.content} (használj {mode} közlekedési módot)"
+                    agent_input = HumanMessage(content=modified_content)
                 
                 try:
                     # Track tool usage for debugging
@@ -197,17 +230,28 @@ if st.session_state.active_tab == "chat":
                     }
                     tool_summary = []
                     
-                    # Run the agent
+                    # MÓDOSÍTOTT RÉSZ: Az új invoke_with_fresh_reasoning metódust használjuk
+                    # Ez biztosítja, hogy új reasoning generálódjon, de a kontextus megmaradjon
+                    
+                    # Összeállítjuk a teljes üzenetlistát a kontextussal
+                    all_messages = st.session_state.raw_messages[:-1] + [agent_input]
+                    
+                    # Az egyszerűsített Agent automatikusan generál reasoning-et minden kérdésre
                     result = budapest_agent.graph.invoke(
                         {"messages": all_messages},
                         {"recursion_limit": 10}
                     )
                     
-                    # Get the final response
-                    final_response = result["messages"][-1]
+                    # Get all result messages
+                    all_result_messages = result["messages"]
+                    
+                    # Extract reasoning and store it
+                    reasoning = extract_reasoning(all_result_messages)
+                    if reasoning:
+                        st.session_state.reasoning_history.append(reasoning)
                     
                     # Track tool calls for debugging and summary
-                    for message in result["messages"]:
+                    for message in all_result_messages:
                         if hasattr(message, 'tool_calls') and message.tool_calls:
                             for tool_call in message.tool_calls:
                                 # Add to debug info
@@ -233,7 +277,7 @@ if st.session_state.active_tab == "chat":
                                     if len(arg_str) > 50:
                                         arg_str = arg_str[:50] + "..."
                                     tool_summary.append(f"🛠️ **{tool_name}**({arg_str})")
-                                
+                                    
                         elif isinstance(message, ToolMessage):
                             current_debug_info["steps"].append({
                                 "tool": message.name,
@@ -244,26 +288,35 @@ if st.session_state.active_tab == "chat":
                     # Add debug info to session state
                     st.session_state.debug_info.append(current_debug_info)
                     
-                    # Display the response with tool summary
-                    response_content = final_response.content
+                    # Save all messages to raw message history for context in next responses
+                    st.session_state.raw_messages.extend(all_result_messages)
                     
-                    # If tool summary exists, add it to the response
-                    if tool_summary:
-                        tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
-                        response_with_tools = response_content + tool_section
-                        st.write(response_with_tools)
+                    # Extract final response and display it
+                    final_response = extract_final_response(all_result_messages)
+                    
+                    if final_response:
+                        response_content = final_response.content
                         
-                        # Add to chat history
-                        st.session_state.messages.append(AIMessage(content=response_with_tools))
+                        # If tool summary exists and debug mode is on, add tool usage info
+                        if tool_summary and debug_mode:
+                            tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
+                            response_with_tools = response_content + tool_section
+                            st.write(response_with_tools)
+                            st.session_state.ai_messages.append(response_with_tools)
+                        else:
+                            # Just show the regular response
+                            st.write(response_content)
+                            st.session_state.ai_messages.append(response_content)
                     else:
-                        # Just show the regular response
-                        st.write(response_content)
-                        st.session_state.messages.append(AIMessage(content=response_content))
+                        error_msg = "Sajnos nem sikerült választ generálni"
+                        st.error(error_msg)
+                        st.session_state.ai_messages.append(error_msg)
                     
                 except Exception as e:
                     # Simple error handling
-                    st.error(f"Hiba történt: {str(e)}")
-                    st.session_state.messages.append(AIMessage(content=f"Sajnos hiba történt: {str(e)}"))
+                    error_msg = f"Sajnos hiba történt: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.ai_messages.append(error_msg)
                 
                 # Rerun to reset UI state
                 st.rerun()
