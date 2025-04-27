@@ -243,7 +243,7 @@ DO NOT write any actual tool calls or code - just describe what you plan to do.
 
 # === Agent class to manage the conversation flow ===
 class Agent:
-    """A LangGraph-based ReAct agent that adds reasoning before tool use."""
+    """A LangGraph-based ReAct agent that always begins with reasoning."""
     
     def __init__(self, model, tools, system=""):
         """Initialize the agent with a language model, tools, and system prompt."""
@@ -255,22 +255,22 @@ class Agent:
         graph = StateGraph(AgentState)
         
         # Add nodes
-        graph.add_node("reason", self.add_reasoning)  # New reasoning node
-        graph.add_node("llm", self.call_openai)  # Node for generating responses or tool calls
-        graph.add_node("action", self.take_action)  # Node for executing tools
+        graph.add_node("reason", self.add_reasoning)  # Reasoning node - always the first step
+        graph.add_node("llm", self.call_openai)       # Node for generating responses
+        graph.add_node("action", self.take_action)    # Node for executing tools
         
-        # Add edges to define the flow:
-        # Start with reasoning -> then LLM -> then possibly action -> back to LLM -> end
-        graph.add_edge("reason", "llm")
+        # Add edges to define the flow - always starting with reasoning
+        graph.add_edge("reason", "llm")               # Reasoning always goes to LLM
         
         graph.add_conditional_edges(
-            "llm",  # From the LLM node
-            self.exists_action,  # Check if there's a tool to call
-            {True: "action", False: END}  # If yes, go to action; if no, end
+            "llm",                                   # From the LLM node
+            self.exists_action,                      # Check if there's a tool to call
+            {True: "action", False: END}             # If yes, go to action; if no, end
         )
-        graph.add_edge("action", "llm")  # After action, go back to LLM
         
-        # Set the entry point to reasoning (the new first step)
+        graph.add_edge("action", "llm")              # After action, go back to LLM
+        
+        # Set the entry point to reasoning - always start with reasoning
         graph.set_entry_point("reason")
         
         # Compile the graph
@@ -282,18 +282,24 @@ class Agent:
         return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
 
     def add_reasoning(self, state: AgentState):
-        """Add reasoning as a message in the state."""
+        """Add reasoning as a message in the state, always for the most recent user query."""
         messages = state['messages']
-        last_message = messages[-1] if messages else None
         
-        # Only reason about human messages
-        if not isinstance(last_message, HumanMessage):
+        # Find the most recent user message to reason about
+        last_user_msg = None
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                last_user_msg = messages[i]
+                break
+        
+        # If no user message found, return empty (shouldn't happen)
+        if not last_user_msg:
             return {'messages': []}
             
-        # Create reasoning prompt with user's query
+        # Create reasoning prompt for the most recent user message
         reasoning_messages = [
             SystemMessage(content=REASONING_PROMPT),
-            HumanMessage(content=f"User message: {last_message.content}\n\nDevelop a plan to answer this request.")
+            HumanMessage(content=f"User message: {last_user_msg.content}\n\nDevelop a plan to answer this request.")
         ]
         
         # Get reasoning plan
@@ -311,7 +317,7 @@ class Agent:
         messages = state['messages']
         
         # Add original system message if not present
-        if self.system and not any(m.content == self.system for m in messages if isinstance(m, SystemMessage)):
+        if self.system and not any(isinstance(msg, SystemMessage) and msg.content == self.system for msg in messages):
             system_msg = SystemMessage(content=self.system)
             messages = [system_msg] + messages
             
