@@ -208,16 +208,13 @@ if st.session_state.active_tab == "chat":
         # Rerun to display the new user message
         st.rerun()
     
-    # Process the agent response if there's a pending user message
+        # Process the agent response if there's a pending user message
     if len(st.session_state.user_messages) > len(st.session_state.ai_messages):
         # Show a spinner while processing
         with st.chat_message("assistant"):
             with st.spinner("Gondolkodom..."):
                 # Get latest user message
                 agent_input = st.session_state.raw_messages[-1]
-                
-                # Get previous context 
-                previous_messages = st.session_state.raw_messages[:-1]
                 
                 # Add transportation mode context if needed
                 if transport_mode != "Tömegközlekedés":
@@ -233,22 +230,22 @@ if st.session_state.active_tab == "chat":
                     }
                     tool_summary = []
                     
-                    # Run the agent
-                    result = budapest_agent.graph.invoke(
-                        {"messages": previous_messages + [agent_input]},
-                        {"recursion_limit": 10}
-                    )
+                    # MÓDOSÍTOTT RÉSZ: Az új invoke_with_fresh_reasoning metódust használjuk
+                    # Ez biztosítja, hogy új reasoning generálódjon, de a kontextus megmaradjon
+                    
+                    # Összeállítjuk a teljes üzenetlistát a kontextussal
+                    all_messages = st.session_state.raw_messages[:-1] + [agent_input]
+                    
+                    # Hívjuk az agentet a speciális invoke metódussal
+                    result = budapest_agent.invoke_with_fresh_reasoning(all_messages)
                     
                     # Get all result messages
                     all_result_messages = result["messages"]
                     
-                    # Extract reasoning and store it 
+                    # Extract reasoning and store it
                     reasoning = extract_reasoning(all_result_messages)
                     if reasoning:
                         st.session_state.reasoning_history.append(reasoning)
-                    
-                    # Get the final response (last AIMessage)
-                    final_response = extract_final_response(all_result_messages)
                     
                     # Track tool calls for debugging and summary
                     for message in all_result_messages:
@@ -277,7 +274,7 @@ if st.session_state.active_tab == "chat":
                                     if len(arg_str) > 50:
                                         arg_str = arg_str[:50] + "..."
                                     tool_summary.append(f"🛠️ **{tool_name}**({arg_str})")
-                                
+                                    
                         elif isinstance(message, ToolMessage):
                             current_debug_info["steps"].append({
                                 "tool": message.name,
@@ -288,14 +285,16 @@ if st.session_state.active_tab == "chat":
                     # Add debug info to session state
                     st.session_state.debug_info.append(current_debug_info)
                     
-                    # Save all result messages to raw message history (for agent context)
+                    # Save all messages to raw message history for context in next responses
                     st.session_state.raw_messages.extend(all_result_messages)
                     
-                    # Display and store the response
+                    # Extract final response and display it
+                    final_response = extract_final_response(all_result_messages)
+                    
                     if final_response:
                         response_content = final_response.content
                         
-                        # If tool summary exists, add it to the response in developer mode
+                        # If tool summary exists and debug mode is on, add tool usage info
                         if tool_summary and debug_mode:
                             tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
                             response_with_tools = response_content + tool_section
