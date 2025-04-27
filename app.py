@@ -1,481 +1,417 @@
-# app.py
-# Simple Streamlit UI for Budapest tourism and transit agent
+
+# agent.py
+# LangGraph-based agent for Budapest tourism and transit information
 # Author: Szalay Miklós Márton
-# Modified to include itinerary planner and reasoning visualization
 # Thesis project for Pannon University
+# Modified to include reasoning step
 
-import streamlit as st
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
 
-# IMPORTANT: set_page_config MUST be the first Streamlit command
-st.set_page_config(
-    page_title="Budapest Explorer",
-    page_icon="🇭🇺",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
+import os
 import json
 import re
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-from agent import budapest_agent
-from itinerary_agent import create_itinerary  # Import the itinerary function
+import requests
+import operator
+from typing import TypedDict, Annotated, List, Dict, Any
 
-# Initialize session state for chat history
-if "user_messages" not in st.session_state:
-    st.session_state.user_messages = []  # Only user messages
+# Import necessary LangChain components
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, END
+from langchain_core.tools import tool
 
-if "ai_messages" not in st.session_state:
-    st.session_state.ai_messages = []  # Only AI final responses
-    
-if "debug_info" not in st.session_state:
-    st.session_state.debug_info = []
+# Load API keys from environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MAPS_API_KEY = os.getenv("MAPS_API_KEY")
 
-# Initialize separate state for raw message history (for agent)
-if "raw_messages" not in st.session_state:
-    st.session_state.raw_messages = []
+# Initialize the LLM with OpenAI
+llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.3)
+reasoning_llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY, temperature=0.1)
 
-# Initialize session state for active tab
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = "chat"
+# === Tool functions ===
 
-# Initialize session state for itinerary
-if "itinerary" not in st.session_state:
-    st.session_state.itinerary = None
+def parse_trip_input(user_input: str) -> dict:
+    """Extract origin and destination from user text input."""
+    prompt = f"""
+    You are a multilingual assistant specializing in Hungarian location recognition.
+    Extract two locations from this sentence.
+    Be flexible with Hungarian address formats and landmarks in Budapest.
+    Respond ONLY with a JSON like:
+    {{"from": "X", "to": "Y"}}
+    Input: "{user_input}"
+    """
+    messages = [HumanMessage(content=prompt)]
+    response = llm.invoke(messages)
 
-# Initialize session state for reasoning storage
-if "reasoning_history" not in st.session_state:
-    st.session_state.reasoning_history = []
+    try:
+        return json.loads(response.content)
+    except:
+        # Fallback parsing with simple regex
+        match = re.search(r'from\s+(.*?)\s+to\s+(.*)', user_input, re.IGNORECASE)
+        if match:
+            return {"from": match.group(1), "to": match.group(2)}
+        # Try Hungarian patterns
+        match = re.search(r'(.*?)-(?:ról|ről|ból|ből|tól|től)\s+(?:a |az )?(.*?)(?:-ra|-re|-ba|-be|-hoz|-hez|-höz)?', user_input, re.IGNORECASE)
+        return {"from": match.group(1), "to": match.group(2)} if match else {"from": "", "to": ""}
 
-# Function to change tabs
-def set_tab(tab_name):
-    st.session_state.active_tab = tab_name
+def get_directions(from_place: str, to_place: str, mode: str = "transit") -> dict:
+    """Get route directions using Google Directions API."""
+    url = "https://maps.googleapis.com/maps/api/directions/json"
     
-# Simple sidebar with app info
-with st.sidebar:
-    st.title("Budapest Explorer")
-    st.markdown("""
-    **Funkciók:**
-    - 🚌 Tömegközlekedési útvonaltervezés
-    - 🏛️ Látnivalók ajánlása
-    - 🍽️ Éttermek, kávézók keresése
-    """)
+    # Add Budapest to location if not specified
+    if "budapest" not in from_place.lower():
+        from_place += ", Budapest, Hungary"
+    if "budapest" not in to_place.lower():
+        to_place += ", Budapest, Hungary"
+        
+    params = {
+        "origin": from_place,
+        "destination": to_place,
+        "mode": mode,
+        "language": "hu",  # Hungarian language for responses
+        "key": MAPS_API_KEY
+    }
     
-    # Add prominent tab buttons at the top of the sidebar
-    st.write("## Válassz funkciót / Choose function:")
+    # Add transit specific parameters if transit mode
+    if mode == "transit":
+        params["transit_mode"] = "bus|subway|train|tram"
     
-    # Create two columns for the buttons
-    col1, col2 = st.columns(2)
+    response = requests.get(url, params=params)
+    return response.json() if response.status_code == 200 else {"error": "Directions API failed"}
+
+def get_local_attractions(lat: float, lng: float, category: str = "tourist_attraction", radius: int = 1000) -> dict:
+    """Find places near coordinates based on category using Google Places API."""
+    places_url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     
-    with col1:
-        if st.button("💬 Chat", use_container_width=True, 
-                    type="primary" if st.session_state.active_tab == "chat" else "secondary"):
-            set_tab("chat")
-            st.rerun()
-            
-    with col2:
-        if st.button("📅 Útiterv", use_container_width=True,
-                    type="primary" if st.session_state.active_tab == "itinerary" else "secondary"):
-            set_tab("itinerary")
-            st.rerun()
+    # Map user-friendly categories to Google Places API types
+    category_map = {
+        "attractions": "tourist_attraction",
+        "restaurants": "restaurant",
+        "cafes": "cafe",
+        "museums": "museum",
+        "parks": "park",
+        "shopping": "shopping_mall",
+    }
     
-    st.markdown("---")
+    place_type = category_map.get(category.lower(), category)
     
-    # Settings in an expandable section
-    with st.expander("Beállítások / Settings"):
-        # Transportation mode selection
-        transport_mode = st.selectbox(
-            "Közlekedési mód / Transportation mode:",
-            ["Tömegközlekedés", "Gyalogos", "Kerékpár", "Autó"],
-            index=0
+    params = {
+        "location": f"{lat},{lng}",
+        "radius": radius,
+        "type": place_type,
+        "language": "hu",
+        "key": MAPS_API_KEY
+    }
+    
+    res = requests.get(places_url, params=params)
+    if res.status_code == 200:
+        data = res.json()
+        places = []
+        for place in data.get("results", [])[:5]:  # Limit to 5 results
+            places.append({
+                "name": place.get("name"),
+                "rating": place.get("rating", "N/A"),
+                "address": place.get("vicinity"),
+                "open_now": place.get("opening_hours", {}).get("open_now", "unknown")
+            })
+        return {"places": places}
+    return {"error": "Places API failed", "places": []}
+
+def extract_attraction_names(text: str) -> list:
+    """Extract attraction names from user query text."""
+    prompt = f"""
+    You are a specialized assistant for Budapest tourism.
+    From the following text, extract any mentioned or implied Budapest attractions, landmarks, or places of interest.
+    Return ONLY a JSON array of attraction names, with no additional text.
+    
+    Example output: ["Parliament Building", "Buda Castle"]
+    
+    Text: "{text}"
+    """
+    messages = [HumanMessage(content=prompt)]
+    response = llm.invoke(messages)
+    
+    try:
+        # Try to parse JSON array from response
+        attractions = json.loads(response.content)
+        if isinstance(attractions, list):
+            return attractions
+    except:
+        # Fallback: Find potential proper nouns (capitalized words)
+        potential_attractions = re.findall(r'([A-Z][a-zA-Záéíóöőúüű]+(?:\s+[A-Z][a-zA-Záéíóöőúüű]+)*)', text)
+        if potential_attractions:
+            return potential_attractions[:3]  # Limit to avoid excessive false positives
+    
+    return []
+
+# === Register tools with LangChain's @tool decorator ===
+
+@tool
+def parse_input_tool(text: str) -> dict:
+    """Parses user input and extracts 'from' and 'to' destinations."""
+    return parse_trip_input(text)
+
+@tool
+def directions_tool(from_place: str, to_place: str, mode: str = "transit") -> dict:
+    """Gets route using Google Directions API.
+    Args:
+        from_place: Starting location
+        to_place: Destination location
+        mode: Transportation mode (transit, walking, bicycling, driving)
+    """
+    return get_directions(from_place, to_place, mode)
+
+@tool
+def attractions_tool(lat: float, lng: float, category: str = "tourist_attraction", radius: int = 1000) -> dict:
+    """Finds places near coordinates based on category.
+    Args:
+        lat: Latitude
+        lng: Longitude
+        category: Place category (attractions, restaurants, cafes, museums, parks, shopping)
+        radius: Search radius in meters
+    """
+    return get_local_attractions(lat, lng, category, radius)
+
+@tool
+def extract_attractions_tool(text: str) -> list:
+    """Extracts attraction names from the user's query.
+    Args:
+        text: The user's query text
+    """
+    return extract_attraction_names(text)
+
+@tool
+def attraction_info_tool(attractions: list) -> dict:
+    """
+    Provides information about Budapest attractions using web search.
+    Args:
+        attractions: A list of attraction names to get information about
+    """
+    if not attractions or len(attractions) == 0:
+        return {"info": "No attractions specified.", "source": "web search"}
+    
+    prompt = f"""
+You are a tourist assistant specialized in Budapest.
+Please provide a short (max 3 sentences) Budapest-specific description for each of the following tourist attractions:
+{json.dumps(attractions, indent=2)}
+Focus ONLY on Budapest context. No global or irrelevant content.
+Return a list where each name is followed by its description.
+"""
+    try:
+        # Use the search-capable model
+        gpt4_model = ChatOpenAI(model="gpt-4o-search-preview-2025-03-11", openai_api_key=OPENAI_API_KEY)
+        response = gpt4_model.invoke([HumanMessage(content=prompt)])
+        
+        return {
+            "info": response.content,
+            "source": "web search",
+            "attractions": attractions
+        }
+    except Exception as e:
+        return {
+            "info": f"Error retrieving information: {str(e)}",
+            "source": "error",
+            "attractions": attractions
+        }
+
+# === Define the agent state ===
+class AgentState(TypedDict):
+    """Represents the state of the agent throughout the conversation."""
+    messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
+
+# === Reasoning prompt for the planning step ===
+REASONING_PROMPT = """
+You are the reasoning component of a Budapest tourist and navigation assistant.
+Your job is to carefully analyze the user's request and plan the approach to answer it.
+
+Given the user's message, think through these steps:
+1. What is the user asking for? (e.g., route planning, attraction info, restaurant recommendations)
+2. What information do we need to gather to answer this question?
+3. Which tools would be most appropriate to use, and in what order?
+4. How will we process and present the information once gathered?
+
+Available tools:
+- parse_input_tool: Extracts origin and destination from user's text
+- directions_tool: Gets route information between two locations
+- attractions_tool: Finds attractions, restaurants, etc. near coordinates
+- extract_attractions_tool: Identifies attraction names in the user's query
+- attraction_info_tool: Gets detailed information about attractions from web search
+
+Format your response as a clear, step-by-step plan.
+DO NOT write any actual tool calls or code - just describe what you plan to do.
+"""
+
+# === Agent class to manage the conversation flow ===
+class Agent:
+    """A LangGraph-based agent with reasoning capability."""
+    
+    def __init__(self, model, tools, system=""):
+        """Initialize the agent with a language model, tools, and system prompt."""
+        self.system = system
+        self.model = model.bind_tools(tools)
+        self.tools = {t.name: t for t in tools}
+
+        # Create a graph with three nodes: reasoning, LLM and action
+        graph = StateGraph(AgentState)
+        
+        # Add nodes
+        graph.add_node("reason", self.add_reasoning)  # New reasoning node
+        graph.add_node("llm", self.call_openai)       # Node for generating responses or tool calls
+        graph.add_node("action", self.take_action)    # Node for executing tools
+        
+        # Add edges to define the flow
+        graph.add_edge("reason", "llm")               # From reasoning to LLM
+        
+        graph.add_conditional_edges(
+            "llm",                                   # From the LLM node
+            self.exists_action,                      # Check if there's a tool to call
+            {True: "action", False: END}             # If yes, go to action; if no, end
         )
         
-        # Map transport mode to API values
-        transport_mode_map = {
-            "Tömegközlekedés": "transit",
-            "Gyalogos": "walking", 
-            "Kerékpár": "bicycling",
-            "Autó": "driving"
-        }
+        graph.add_edge("action", "llm")              # After action, go back to LLM
         
-        # Debug mode toggle
-        debug_mode = st.toggle("Developer Mode", value=False)
+        # Set the entry point to the reasoning node
+        graph.set_entry_point("reason")
         
-    st.caption("© 2025 Budapest Explorer - Pannon Egyetem")
+        # Compile the graph
+        self.graph = graph.compile()
 
-# Function to extract reasoning from SystemMessage
-def extract_reasoning(messages):
-    for msg in messages:
-        if isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content:
-            # Extract the reasoning part
-            match = re.search(r"### Reasoning Plan:(.*?)###", msg.content, re.DOTALL)
-            if match:
-                return match.group(1).strip()
-    return None
+    def exists_action(self, state: AgentState):
+        """Check if the last message contains any tool calls."""
+        result = state['messages'][-1]
+        return hasattr(result, 'tool_calls') and len(getattr(result, 'tool_calls', [])) > 0
 
-# Extract the final AI message from result messages
-def extract_final_response(messages):
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            return msg
-    return None
+    def add_reasoning(self, state: AgentState):
+        """Add reasoning as a message in the state."""
+        messages = state['messages']
+        
+        # Find the most recent user message to reason about
+        last_user_msg = None
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                last_user_msg = messages[i]
+                break
+        
+        # If no user message found, return empty state (shouldn't happen)
+        if not last_user_msg:
+            return {'messages': []}
+            
+        # Create reasoning prompt with the latest user question
+        reasoning_messages = [
+            SystemMessage(content=REASONING_PROMPT),
+            HumanMessage(content=f"User message: {last_user_msg.content}\n\nDevelop a plan to answer this request.")
+        ]
+        
+        # Get reasoning plan
+        reasoning_response = reasoning_llm.invoke(reasoning_messages)
+        reasoning_content = reasoning_response.content
+        
+        # Create a system message with reasoning to add to the state
+        reasoning_msg = SystemMessage(content=f"### Reasoning Plan:\n{reasoning_content}\n\n### Now execute this plan to help the user.")
+        
+        # Return the reasoning message to be added to the state
+        return {'messages': [reasoning_msg]}
 
-# Display different content based on active tab
-if st.session_state.active_tab == "chat":
-    # CHAT TAB
-    # Main page title
-    st.title("🇭🇺 Budapest Explorer - Chat")
-    
-    # Layout based on debug mode
-    if debug_mode:
-        # Split screen into chat and debug panels
-        cols = st.columns([2, 1])
+    def call_openai(self, state: AgentState):
+        """Call the language model to generate a response or tool calls."""
+        messages = state['messages']
         
-        # Main chat in first column
-        with cols[0]:
-            # Display clean chat history - just user questions and AI answers
-            for i in range(max(len(st.session_state.user_messages), len(st.session_state.ai_messages))):
-                # Display user message if available
-                if i < len(st.session_state.user_messages):
-                    with st.chat_message("user"):
-                        st.write(st.session_state.user_messages[i])
-                
-                # Display AI response if available
-                if i < len(st.session_state.ai_messages):
-                    with st.chat_message("assistant"):
-                        st.write(st.session_state.ai_messages[i])
+        # Add system message if not present
+        if self.system and not any(isinstance(msg, SystemMessage) and msg.content == self.system for msg in messages):
+            system_msg = SystemMessage(content=self.system)
+            messages = [system_msg] + messages
             
-            # User input
-            user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
+        # Call the model and get a response
+        message = self.model.invoke(messages)
         
-        # Debug panel in second column
-        with cols[1]:
-            st.title("🔍 Developer Mode")
-            
-            # Display reasoning history
-            if st.session_state.reasoning_history:
-                with st.expander("💡 Reasoning Process", expanded=True):
-                    st.markdown("### Latest Reasoning:")
-                    st.markdown(st.session_state.reasoning_history[-1])
-                    
-                    # Korábbi reasoning-ek megjelenítése beágyazott expander nélkül
-                    if len(st.session_state.reasoning_history) > 1:
-                        st.markdown("### Previous Reasoning:")
-                        for i, reasoning in enumerate(st.session_state.reasoning_history[:-1]):
-                            st.markdown(f"#### Query {i+1}")
-                            st.markdown(reasoning)
-                            st.markdown("---")
-            
-            if st.session_state.debug_info:
-                with st.expander("Tool Calls", expanded=True):
-                    for i, interaction in enumerate(st.session_state.debug_info):
-                        st.markdown(f"#### Query {i+1}: {interaction['user_query'][:30]}...")
-                        
-                        # Display tool calls
-                        for step in interaction['steps']:
-                            if step['step'] == 'tool_call':
-                                st.markdown(f"**Tool Called: `{step['tool']}`**")
-                                st.code(json.dumps(step['args'], indent=2), language='json')
-                            else:
-                                st.markdown(f"**Tool Result:**")
-                                st.text(step['result'][:500] + ('...' if len(step['result']) > 500 else ''))
-                            st.markdown("---")
-    else:
-        # Simple chat layout without debug panel
-        # Display clean chat history - just user questions and AI answers
-        for i in range(max(len(st.session_state.user_messages), len(st.session_state.ai_messages))):
-            # Display user message if available
-            if i < len(st.session_state.user_messages):
-                with st.chat_message("user"):
-                    st.write(st.session_state.user_messages[i])
-            
-            # Display AI response if available
-            if i < len(st.session_state.ai_messages):
-                with st.chat_message("assistant"):
-                    st.write(st.session_state.ai_messages[i])
+        # Return the updated state with the new message
+        return {'messages': [message]}
+
+    def take_action(self, state: AgentState):
+        """Execute any tool calls from the language model."""
+        tool_calls = state['messages'][-1].tool_calls
+        results = []
         
-        # User input
-        user_prompt = st.chat_input("Mit szeretnél tudni Budapest közlekedéséről vagy látnivalóiról?")
-    
-    # Handle user input
-    if user_prompt:
-        # Add user message to displayed messages
-        st.session_state.user_messages.append(user_prompt)
-        
-        # Add user message to raw messages for agent context
-        user_message = HumanMessage(content=user_prompt)
-        st.session_state.raw_messages.append(user_message)
-        
-        # Rerun to display the new user message
-        st.rerun()
-    
-        # Process the agent response if there's a pending user message
-    if len(st.session_state.user_messages) > len(st.session_state.ai_messages):
-        # Show a spinner while processing
-        with st.chat_message("assistant"):
-            with st.spinner("Gondolkodom..."):
-                # Get latest user message
-                agent_input = st.session_state.raw_messages[-1]
-                
-                # Add transportation mode context if needed
-                if transport_mode != "Tömegközlekedés":
-                    mode = transport_mode_map[transport_mode]
-                    modified_content = f"{agent_input.content} (használj {mode} közlekedési módot)"
-                    agent_input = HumanMessage(content=modified_content)
-                
+        # Process each tool call
+        for t in tool_calls:
+            if t['name'] not in self.tools:
+                result = f"Invalid tool name: {t['name']}. Retry."
+            else:
                 try:
-                    # Track tool usage for debugging
-                    current_debug_info = {
-                        "user_query": agent_input.content,
-                        "steps": []
-                    }
-                    tool_summary = []
-                    
-                    # MÓDOSÍTOTT RÉSZ: Az új invoke_with_fresh_reasoning metódust használjuk
-                    # Ez biztosítja, hogy új reasoning generálódjon, de a kontextus megmaradjon
-                    
-                    # Összeállítjuk a teljes üzenetlistát a kontextussal
-                    all_messages = st.session_state.raw_messages[:-1] + [agent_input]
-                    
-                    # Az egyszerűsített Agent automatikusan generál reasoning-et minden kérdésre
-                    result = budapest_agent.graph.invoke(
-                        {"messages": all_messages},
-                        {"recursion_limit": 10}
-                    )
-                    
-                    # Get all result messages
-                    all_result_messages = result["messages"]
-                    
-                    # Extract reasoning and store it
-                    reasoning = extract_reasoning(all_result_messages)
-                    if reasoning:
-                        st.session_state.reasoning_history.append(reasoning)
-                    
-                    # Track tool calls for debugging and summary
-                    for message in all_result_messages:
-                        if hasattr(message, 'tool_calls') and message.tool_calls:
-                            for tool_call in message.tool_calls:
-                                # Add to debug info
-                                current_debug_info["steps"].append({
-                                    "tool": tool_call["name"],
-                                    "args": tool_call["args"],
-                                    "step": "tool_call"
-                                })
-                                
-                                # Add to summary for chat display
-                                tool_name = tool_call["name"]
-                                args = tool_call["args"]
-                                
-                                # Format differently based on tool
-                                if tool_name == "attraction_info_tool":
-                                    if isinstance(args, dict) and 'attractions' in args:
-                                        attractions = args['attractions']
-                                        tool_summary.append(f"🔍 **Web keresés**: {attractions}")
-                                    else:
-                                        tool_summary.append(f"🔍 **Web keresés**: {args}")
-                                else:
-                                    arg_str = str(args)
-                                    if len(arg_str) > 50:
-                                        arg_str = arg_str[:50] + "..."
-                                    tool_summary.append(f"🛠️ **{tool_name}**({arg_str})")
-                                    
-                        elif isinstance(message, ToolMessage):
-                            current_debug_info["steps"].append({
-                                "tool": message.name,
-                                "result": message.content,
-                                "step": "tool_result"
-                            })
-                    
-                    # Add debug info to session state
-                    st.session_state.debug_info.append(current_debug_info)
-                    
-                    # Save all messages to raw message history for context in next responses
-                    st.session_state.raw_messages.extend(all_result_messages)
-                    
-                    # Extract final response and display it
-                    final_response = extract_final_response(all_result_messages)
-                    
-                    if final_response:
-                        response_content = final_response.content
-                        
-                        # If tool summary exists and debug mode is on, add tool usage info
-                        if tool_summary and debug_mode:
-                            tool_section = "\n\n---\n### Használt eszközök:\n" + "\n".join(tool_summary)
-                            response_with_tools = response_content + tool_section
-                            st.write(response_with_tools)
-                            st.session_state.ai_messages.append(response_with_tools)
-                        else:
-                            # Just show the regular response
-                            st.write(response_content)
-                            st.session_state.ai_messages.append(response_content)
-                    else:
-                        error_msg = "Sajnos nem sikerült választ generálni"
-                        st.error(error_msg)
-                        st.session_state.ai_messages.append(error_msg)
-                    
+                    # Call the tool with the arguments
+                    result = self.tools[t['name']].invoke(t['args'])
                 except Exception as e:
-                    # Simple error handling
-                    error_msg = f"Sajnos hiba történt: {str(e)}"
-                    st.error(error_msg)
-                    st.session_state.ai_messages.append(error_msg)
-                
-                # Rerun to reset UI state
-                st.rerun()
-
-else:
-    # ITINERARY PLANNER TAB
-    st.title("🇭🇺 Budapest Explorer - Útiterv / Itinerary")
-    
-    # Create two columns
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.subheader("Útiterv készítés / Create Itinerary")
-        
-        # Itinerary form
-        with st.form("itinerary_form"):
-            # Starting location
-            start_location = st.text_input(
-                "Kiindulási pont / Starting location:",
-                value="Deák Ferenc tér"
-            )
-            
-            # Available time
-            available_time = st.slider(
-                "Rendelkezésre álló idő (óra) / Available time (hours):",
-                min_value=2,
-                max_value=12,
-                value=4,
-                step=1
-            )
-            
-            # Interests (multiselect)
-            interests = st.multiselect(
-                "Érdeklődési körök / Interests:",
-                options=[
-                    "Múzeumok / Museums",
-                    "Történelem / History",
-                    "Építészet / Architecture",
-                    "Gasztronómia / Food",
-                    "Természet / Nature",
-                    "Vásárlás / Shopping",
-                    "Művészet / Art",
-                    "Éjszakai élet / Nightlife"
-                ],
-                default=["Történelem / History", "Építészet / Architecture"]
-            )
-            
-            # Map the selected interests to English for processing
-            interest_map = {
-                "Múzeumok / Museums": "museums",
-                "Történelem / History": "history",
-                "Építészet / Architecture": "architecture",
-                "Gasztronómia / Food": "food",
-                "Természet / Nature": "nature",
-                "Vásárlás / Shopping": "shopping",
-                "Művészet / Art": "art",
-                "Éjszakai élet / Nightlife": "nightlife"
-            }
-            
-            # Transportation mode
-            itinerary_transport = st.selectbox(
-                "Közlekedési mód / Transportation mode:",
-                options=[
-                    "Tömegközlekedés / Transit",
-                    "Gyalogos / Walking",
-                    "Kerékpár / Bicycling",
-                    "Autó / Car"
-                ],
-                index=0
-            )
-            
-            # Map the transport mode
-            transport_map = {
-                "Tömegközlekedés / Transit": "transit",
-                "Gyalogos / Walking": "walking",
-                "Kerékpár / Bicycling": "bicycling",
-                "Autó / Car": "driving"
-            }
-            
-            # Special requests
-            special_requests = st.text_area(
-                "Egyéb kívánságok / Special requests:",
-                placeholder="Pl.: Szeretnék látni a Parlamentet... / E.g.: I'd like to see the Parliament..."
-            )
-            
-            # Submit button
-            submit_button = st.form_submit_button("Útiterv készítése / Create Itinerary")
-            
-            if submit_button:
-                # Show spinner during processing
-                with st.spinner("Útiterv készítése folyamatban... / Creating itinerary..."):
-                    # Prepare preferences
-                    preferences = {
-                        "start_location": start_location,
-                        "available_time": available_time,
-                        "interests": [interest_map[i] for i in interests],
-                        "transport_mode": transport_map[itinerary_transport],
-                        "special_requests": special_requests
-                    }
+                    result = f"Error executing tool: {str(e)}"
                     
-                    # Call the itinerary function
-                    try:
-                        itinerary = create_itinerary(preferences)
-                        st.session_state.itinerary = itinerary
-                    except Exception as e:
-                        st.error(f"Hiba történt: {str(e)}")
-                        st.session_state.itinerary = "Sajnos hiba történt az útiterv készítése során."
-    
-    with col2:
-        # Display the itinerary if available
-        if st.session_state.itinerary:
-            st.subheader("Az útiterved / Your Itinerary")
-            st.markdown(st.session_state.itinerary)
-        else:
-            # Show instructions or sample itinerary
-            st.info("Töltsd ki az űrlapot az útiterv elkészítéséhez! / Fill out the form to create your itinerary!")
+            # Create a tool message with the result
+            results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
             
-            with st.expander("Minta útiterv / Sample Itinerary"):
-                st.markdown("""
-                # Budapest Felfedezése - Egy Napos Útiterv
-                
-                ## Reggel 10:00 - Hősök tere
-                A Hősök tere Budapest egyik ikonikus látványossága, ahol megcsodálhatod a magyar történelem fontos alakjainak szobrait.
-                
-                **Időtartam:** 30 perc
-                
-                ## Reggel 10:30 - Városliget
-                Sétálj át a Városligetbe, ahol megtalálod a Vajdahunyad várát és a Széchenyi fürdőt.
-                
-                **Időtartam:** 1 óra
-                
-                ## Délelőtt 11:30 - Andrássy út
-                Haladj végig az Andrássy úton a belváros felé, útközben megcsodálhatod a gyönyörű épületeket.
-                
-                **Közlekedés:** M1-es metró, 10 perc
-                
-                ## Déli 12:30 - Ebéd a Gozsdu udvarban
-                Élvezd Budapest gasztronómiai kínálatát a Gozsdu udvar valamelyik éttermében.
-                
-                **Időtartam:** 1 óra
-                
-                ## Délután 14:00 - Szent István Bazilika
-                Látogasd meg Budapest legnagyobb templomát, ahonnan csodálatos kilátás nyílik a városra.
-                
-                **Időtartam:** 45 perc
-                
-                ## Délután 15:00 - Duna-part és Parlament
-                Sétálj le a Duna-partra és csodáld meg a magyar Parlamentet kívülről.
-                
-                **Közlekedés:** Gyalog, 15 perc
-                
-                ## Délután 16:00 - Lánchíd és Budai vár
-                Sétálj át a Lánchídon Budára, majd látogasd meg a Budai várat.
-                
-                **Időtartam:** 2 óra
-                
-                Ez csak egy minta útiterv. A te személyre szabott útiterved az érdeklődési köreid és a rendelkezésre álló időd alapján készül el.
-                """)
+        # Return the updated state with the tool results
+        return {'messages': results}
 
-# Simple footer
-st.markdown("---")
-st.caption("Fejlesztette: Szalay Miklós Márton | Pannon Egyetem")
+# === System prompt for the agent ===
+prompt = """
+You are a helpful Hungarian assistant for Budapest public transport and sightseeing.
+You help tourists and locals navigate Budapest and discover interesting places.
+
+Follow these steps when responding to users:
+
+1. For route planning:
+   - Extract origin and destination from user input using parse_input_tool
+   - Call directions_tool with both locations to get a route
+   - Format the route results into a user-friendly summary following these guidelines:
+     * Start with a header showing origin → destination
+     * Include the total duration and distance
+     * List each step of the journey with appropriate icons:
+       - 🚆 for transit vehicles (showing line numbers, vehicle types, and stop names)
+       - 🚶 for walking segments (showing duration)
+     * Format step numbers and use clear arrows (→) between locations
+     * For transit steps, include: line number, vehicle type, departure stop, and arrival stop
+   - If the user specifies a transportation mode (walking, bicycling, driving), use that mode
+
+2. For attraction recommendations:
+   - Get coordinates from the route data
+   - Call attractions_tool with relevant coordinates
+   - If the user specifies a category (restaurants, cafes, etc.), use that category
+   - After getting attractions, use attraction_info_tool to get accurate descriptions
+
+3. For specific information about attractions:
+   - Use extract_attractions_tool first to identify attraction names in the query
+   - Then use attraction_info_tool with those attraction names
+   - When showing attraction information, CLEARLY mention you got this from web search
+
+IMPORTANT RULES:
+- When users ask about attractions in Budapest, always use the web search capability
+- First extract attraction names with extract_attractions_tool, then look them up with attraction_info_tool
+- Explicitly state that information comes from "web search" in your responses
+- When formatting route information from directions_tool, pay special attention to:
+  * Use a consistent, readable format with proper spacing and organization
+  * For transit routes, clearly indicate line numbers and vehicle types (bus, tram, metro)
+  * Include emojis to represent different transportation modes (🚆, 🚍, 🚇, 🚶)
+  * Format durations and distances in a readable way
+  * Structure step-by-step directions with clear numbering
+  * Handle error cases gracefully (route not found, invalid locations)
+- Always end your responses with 1-2 relevant follow-up questions based on the information provided:
+  * For route planning: Ask about attractions or restaurants near the destination
+  * For attraction information: Ask if they want to know about nearby places or how to get there
+  * For general queries: Suggest related topics or activities in Budapest
+
+Always respond in the same language the user used to ask their question.
+Be helpful, friendly, and provide concise but complete information.
+"""
+
+# Create the model instance
+model = ChatOpenAI(model="gpt-4o-mini", openai_api_key=OPENAI_API_KEY)
+
+# Define the tools available to the agent
+tools = [
+    parse_input_tool, 
+    directions_tool, 
+    attractions_tool,
+    extract_attractions_tool,
+    attraction_info_tool
+]
+
+# Create the agent instance
+budapest_agent = Agent(model, tools, system=prompt)
