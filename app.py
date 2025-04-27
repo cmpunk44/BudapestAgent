@@ -236,8 +236,11 @@ if st.session_state.active_tab == "chat":
                     # Összeállítjuk a teljes üzenetlistát a kontextussal
                     all_messages = st.session_state.raw_messages[:-1] + [agent_input]
                     
-                    # Hívjuk az agentet a speciális invoke metódussal
-                    result = budapest_agent.invoke_with_fresh_reasoning(all_messages)
+                    # Az egyszerűsített Agent automatikusan generál reasoning-et minden kérdésre
+                    result = budapest_agent.graph.invoke(
+                        {"messages": all_messages},
+                        {"recursion_limit": 10}
+                    )
                     
                     # Get all result messages
                     all_result_messages = result["messages"]
