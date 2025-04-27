@@ -12,7 +12,7 @@ import json
 import re
 import requests
 import operator
-from typing import TypedDict, Annotated, List, Dict, Any
+from typing import TypedDict, Annotated, List, Dict, Any, Optional
 
 # Import necessary LangChain components
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AnyMessage, AIMessage
@@ -218,6 +218,8 @@ Return a list where each name is followed by its description.
 class AgentState(TypedDict):
     """Represents the state of the agent throughout the conversation."""
     messages: Annotated[list[AnyMessage], operator.add]  # The messages accumulate
+    # Add a field to track the latest user message that needs reasoning
+    last_user_msg_id: Optional[str]  # ID of the last user message that was reasoned about
 
 # === Reasoning prompt for the planning step ===
 REASONING_PROMPT = """
@@ -296,21 +298,35 @@ class Agent:
         if not last_user_msg:
             return {'messages': []}
             
-        # Create reasoning prompt for the most recent user message
+        # Check if we already reasoned about this specific message
+        # We use a unique ID based on content to track this
+        user_msg_id = f"user_{hash(last_user_msg.content)}"
+        
+        if state.get('last_user_msg_id') == user_msg_id:
+            # We've already reasoned about this exact message, look for the reasoning
+            for msg in messages:
+                if isinstance(msg, SystemMessage) and "### Reasoning Plan:" in msg.content:
+                    # We found existing reasoning, use it again
+                    return {'messages': []}
+        
+        # Set up a new isolated reasoning context to ensure fresh reasoning
         reasoning_messages = [
             SystemMessage(content=REASONING_PROMPT),
             HumanMessage(content=f"User message: {last_user_msg.content}\n\nDevelop a plan to answer this request.")
         ]
         
-        # Get reasoning plan
+        # Generate fresh reasoning with the reasoning LLM - independent from conversation history
         reasoning_response = reasoning_llm.invoke(reasoning_messages)
         reasoning_content = reasoning_response.content
         
-        # Create a system message with reasoning to add to the state
+        # Create a system message with reasoning
         reasoning_msg = SystemMessage(content=f"### Reasoning Plan:\n{reasoning_content}\n\n### Now execute this plan to help the user.")
         
-        # Return the reasoning as a message to be added to the state
-        return {'messages': [reasoning_msg]}
+        # Return the reasoning and update the last user message ID
+        return {
+            'messages': [reasoning_msg], 
+            'last_user_msg_id': user_msg_id
+        }
 
     def call_openai(self, state: AgentState):
         """Call the language model to generate a response or tool calls."""
@@ -325,7 +341,7 @@ class Agent:
         message = self.model.invoke(messages)
         
         # Return the updated state with the new message
-        return {'messages': [message]}
+        return {'messages': [message], 'last_user_msg_id': state.get('last_user_msg_id')}
 
     def take_action(self, state: AgentState):
         """Execute any tool calls from the language model."""
@@ -347,7 +363,58 @@ class Agent:
             results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
             
         # Return the updated state with the tool results
-        return {'messages': results}
+        return {'messages': results, 'last_user_msg_id': state.get('last_user_msg_id')}
+
+    # New method to invoke the agent with clean context for reasoning
+    def invoke_with_fresh_reasoning(self, messages):
+        """
+        Special invoke method that ensures fresh reasoning for each new user query
+        while preserving full conversation context.
+        """
+        # Find the most recent user message
+        last_user_msg = None
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                last_user_msg = msg
+                break
+                
+        if not last_user_msg:
+            # No user message to reason about
+            return {"messages": messages}
+            
+        # Generate fresh reasoning first with isolated context
+        reasoning_messages = [
+            SystemMessage(content=REASONING_PROMPT),
+            HumanMessage(content=f"User message: {last_user_msg.content}\n\nDevelop a plan to answer this request.")
+        ]
+        
+        reasoning_response = reasoning_llm.invoke(reasoning_messages)
+        reasoning_content = reasoning_response.content
+        
+        # Create a reasoning message
+        reasoning_msg = SystemMessage(content=f"### Reasoning Plan:\n{reasoning_content}\n\n### Now execute this plan to help the user.")
+        
+        # Create a full message list with system prompt, history, and new reasoning
+        full_messages = []
+        
+        # Add system prompt if it exists
+        if self.system:
+            full_messages.append(SystemMessage(content=self.system))
+            
+        # Add all previous messages except the last user message
+        previous_messages = []
+        for msg in messages:
+            if msg != last_user_msg:
+                previous_messages.append(msg)
+                
+        full_messages.extend(previous_messages)
+        
+        # Add reasoning and last user message
+        full_messages.append(reasoning_msg)
+        full_messages.append(last_user_msg)
+        
+        # Now invoke the normal graph with this prepared context
+        return self.graph.invoke({"messages": full_messages, "last_user_msg_id": f"user_{hash(last_user_msg.content)}"})
 
 # === System prompt for the agent ===
 prompt = """
